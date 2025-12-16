@@ -1,8 +1,23 @@
 import logging
 import numpy as np
-from typing import Tuple
+from typing import Optional, Tuple, Union
 
-from model.tinylidarnet import TinyLidarNetNp, TinyLidarNetSmallNp, TinyLidarNetDeepNp
+from model.tinylidarnet import (
+    TinyLidarNetNp, TinyLidarNetSmallNp, TinyLidarNetDeepNp, TinyLidarNetFusionNp,
+    TinyLidarNetStackedNp, TinyLidarNetBiLSTMNp, TinyLidarNetTCNNp
+)
+
+
+# Normalization constants for kinematic state features (must match training)
+ODOM_NORM_CONSTANTS = {
+    'position': 100.0,      # Normalize position by 100m (relative coordinates)
+    'orientation': 1.0,     # Quaternion already in [-1, 1]
+    'linear_vel': 30.0,     # Max speed ~30 m/s
+    'angular_vel': 3.14159, # Max angular velocity ~π rad/s
+}
+
+# Temporal model architectures
+TEMPORAL_ARCHITECTURES = ['stacked', 'bilstm', 'tcn']
 
 
 class TinyLidarNetCore:
@@ -12,13 +27,22 @@ class TinyLidarNetCore:
     weight loading, input preprocessing (cleaning, resizing, normalizing), and
     inference execution. It is designed to be framework-agnostic.
 
+    Supports multiple architectures:
+    - Single-frame: large, small, deep, fusion
+    - Temporal: stacked, bilstm, tcn
+
     Attributes:
         input_dim (int): Dimension of the input vector expected by the model.
         output_dim (int): Dimension of the output vector (acceleration, steering).
-        architecture (str): Model architecture type ('large', 'small', or 'deep').
+        state_dim (int): Dimension of the kinematic state vector.
+        seq_len (int): Sequence length for temporal models.
+        hidden_size (int): Hidden size for temporal models (BiLSTM, TCN).
+        architecture (str): Model architecture type.
         acceleration (float): Fixed acceleration value used in 'fixed' control mode.
         control_mode (str): Control strategy ('ai' or 'fixed').
         max_range (float): Maximum LiDAR range used for normalization and clipping.
+        use_fusion (bool): Whether the model uses kinematic state fusion.
+        is_temporal (bool): Whether the model is a temporal model.
         model (object): The instantiated neural network model.
         logger (logging.Logger): Logger instance.
     """
@@ -27,6 +51,9 @@ class TinyLidarNetCore:
         self,
         input_dim: int = 1080,
         output_dim: int = 2,
+        state_dim: int = 13,
+        seq_len: int = 10,
+        hidden_size: int = 128,
         architecture: str = 'large',
         ckpt_path: str = '',
         acceleration: float = 0.1,
@@ -40,7 +67,14 @@ class TinyLidarNetCore:
                 Defaults to 1080.
             output_dim (int, optional): The number of output control values.
                 Defaults to 2.
-            architecture (str, optional): The model architecture to use ('large', 'small', or 'deep').
+            state_dim (int, optional): The number of kinematic state features.
+                Defaults to 13.
+            seq_len (int, optional): Sequence length for temporal models.
+                Defaults to 10.
+            hidden_size (int, optional): Hidden size for temporal models.
+                Defaults to 128.
+            architecture (str, optional): The model architecture to use.
+                Options: 'large', 'small', 'deep', 'fusion', 'stacked', 'bilstm', 'tcn'.
                 Defaults to 'large'.
             ckpt_path (str, optional): Path to the numpy weight file (.npy or .npz).
                 Defaults to ''.
@@ -56,16 +90,49 @@ class TinyLidarNetCore:
         """
         self.input_dim = input_dim
         self.output_dim = output_dim
+        self.state_dim = state_dim
+        self.seq_len = seq_len
+        self.hidden_size = hidden_size
         self.architecture = architecture.lower()
         self.acceleration = acceleration
         self.control_mode = control_mode.lower()
         self.max_range = max_range
+        self.use_fusion = self.architecture == 'fusion'
+        self.is_temporal = self.architecture in TEMPORAL_ARCHITECTURES
         self.logger = logging.getLogger(__name__)
 
+        # Initialize model based on architecture
         if self.architecture == 'small':
             self.model = TinyLidarNetSmallNp(input_dim=self.input_dim, output_dim=self.output_dim)
         elif self.architecture == 'deep':
             self.model = TinyLidarNetDeepNp(input_dim=self.input_dim, output_dim=self.output_dim)
+        elif self.architecture == 'fusion':
+            self.model = TinyLidarNetFusionNp(
+                input_dim=self.input_dim, 
+                state_dim=self.state_dim,
+                output_dim=self.output_dim
+            )
+        elif self.architecture == 'stacked':
+            self.model = TinyLidarNetStackedNp(
+                input_dim=self.input_dim,
+                state_dim=self.state_dim,
+                seq_len=self.seq_len,
+                output_dim=self.output_dim
+            )
+        elif self.architecture == 'bilstm':
+            self.model = TinyLidarNetBiLSTMNp(
+                input_dim=self.input_dim,
+                state_dim=self.state_dim,
+                hidden_size=self.hidden_size,
+                output_dim=self.output_dim
+            )
+        elif self.architecture == 'tcn':
+            self.model = TinyLidarNetTCNNp(
+                input_dim=self.input_dim,
+                state_dim=self.state_dim,
+                hidden_size=self.hidden_size,
+                output_dim=self.output_dim
+            )
         else:
             self.model = TinyLidarNetNp(input_dim=self.input_dim, output_dim=self.output_dim)
 
@@ -74,27 +141,44 @@ class TinyLidarNetCore:
         else:
             self.logger.warning("No weight file provided. Using randomly initialized weights.")
 
-    def process(self, ranges: np.ndarray) -> Tuple[float, float]:
+    def process(
+        self, 
+        ranges: np.ndarray, 
+        odom: Optional[np.ndarray] = None
+    ) -> Tuple[float, float]:
         """Runs the complete inference pipeline on raw LiDAR data.
 
         This method handles data cleaning (NaN/Inf removal), resizing, normalization,
-        and model inference.
+        and model inference. For fusion models, also processes kinematic state.
 
         Args:
             ranges (np.ndarray): A 1D numpy array containing raw LiDAR range data.
+            odom (np.ndarray, optional): A 1D numpy array containing kinematic state
+                features (13 dimensions). Required for fusion architecture.
 
         Returns:
             Tuple[float, float]: A tuple containing (acceleration, steering_angle).
                 Values are clipped between -1.0 and 1.0.
         """
-        # 1. Preprocess (Clean -> Resize -> Normalize)
+        # 1. Preprocess LiDAR (Clean -> Resize -> Normalize)
         processed_ranges = self._preprocess_ranges(ranges)
 
         # Prepare input tensor: (1, 1, input_dim)
         x = np.expand_dims(np.expand_dims(processed_ranges, axis=0), axis=1)
 
         # 2. Inference
-        outputs = self.model(x)[0]
+        if self.use_fusion:
+            # Process odometry data
+            if odom is None:
+                odom = np.zeros(self.state_dim, dtype=np.float32)
+            
+            processed_odom = self._preprocess_odom(odom)
+            # Prepare state tensor: (1, state_dim)
+            state = np.expand_dims(processed_odom, axis=0)
+            
+            outputs = self.model(x, state)[0]
+        else:
+            outputs = self.model(x)[0]
 
         # 3. Post-process
         if self.control_mode == "ai":
@@ -105,6 +189,65 @@ class TinyLidarNetCore:
         steer = float(np.clip(outputs[1], -1.0, 1.0))
 
         return accel, steer
+
+    def process_sequence(
+        self, 
+        scan_seq: np.ndarray, 
+        odom_seq: np.ndarray
+    ) -> Tuple[float, float]:
+        """Runs inference on a sequence of frames for temporal models.
+
+        Args:
+            scan_seq (np.ndarray): Sequence of LiDAR scans, shape (seq_len, scan_dim).
+            odom_seq (np.ndarray): Sequence of odom data, shape (seq_len, state_dim).
+
+        Returns:
+            Tuple[float, float]: A tuple containing (acceleration, steering_angle).
+        """
+        if not self.is_temporal:
+            raise ValueError("process_sequence() is only for temporal models")
+        
+        # Preprocess each frame in the sequence
+        processed_scans = np.stack([
+            self._preprocess_ranges(scan_seq[t]) for t in range(len(scan_seq))
+        ], axis=0)  # (seq_len, input_dim)
+        
+        processed_odoms = np.stack([
+            self._preprocess_odom(odom_seq[t]) for t in range(len(odom_seq))
+        ], axis=0)  # (seq_len, state_dim)
+        
+        # Add batch dimension: (1, seq_len, dim)
+        scans_batch = np.expand_dims(processed_scans, axis=0)
+        odoms_batch = np.expand_dims(processed_odoms, axis=0)
+        
+        # Run inference based on architecture
+        if self.architecture == 'bilstm':
+            # BiLSTM processes frame by frame, maintaining state
+            # For full sequence, we need to process all frames
+            for t in range(len(scan_seq)):
+                scan_t = scans_batch[:, t:t+1, :]  # (1, 1, scan_dim)
+                odom_t = odoms_batch[:, t, :]      # (1, state_dim)
+                outputs = self.model(scan_t, odom_t)
+        else:
+            # Stacked and TCN process the full sequence at once
+            outputs = self.model(scans_batch, odoms_batch)
+        
+        outputs = outputs[0]  # Remove batch dimension
+        
+        # Post-process
+        if self.control_mode == "ai":
+            accel = float(np.clip(outputs[0], -1.0, 1.0))
+        else:
+            accel = self.acceleration
+
+        steer = float(np.clip(outputs[1], -1.0, 1.0))
+
+        return accel, steer
+
+    def reset_temporal_state(self):
+        """Resets the temporal state for BiLSTM model."""
+        if self.architecture == 'bilstm' and hasattr(self.model, 'reset_state'):
+            self.model.reset_state()
 
     def _load_weights(self, path: str) -> None:
         """Loads model weights from a file into the model parameters.
@@ -177,4 +320,32 @@ class TinyLidarNetCore:
             ranges = np.pad(ranges, (0, self.input_dim - current_len), 'constant')
 
         # Normalize
-        return ranges / self.max_range 
+        return ranges / self.max_range
+
+    def _preprocess_odom(self, odom: np.ndarray) -> np.ndarray:
+        """Normalizes kinematic state features.
+
+        This method normalizes the 13-dimensional kinematic state vector:
+        - Position (0-2): Divided by 100.0
+        - Orientation (3-6): Unchanged (quaternion already in [-1, 1])
+        - Linear velocity (7-9): Divided by 30.0
+        - Angular velocity (10-12): Divided by π
+
+        Args:
+            odom (np.ndarray): Raw kinematic state features (13,).
+
+        Returns:
+            np.ndarray: Normalized state features (13,).
+        """
+        odom = odom.copy().astype(np.float32)
+        
+        # Handle invalid values
+        odom = np.nan_to_num(odom, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # Normalize each component
+        odom[0:3] /= ODOM_NORM_CONSTANTS['position']
+        # odom[3:7] unchanged (quaternion)
+        odom[7:10] /= ODOM_NORM_CONSTANTS['linear_vel']
+        odom[10:13] /= ODOM_NORM_CONSTANTS['angular_vel']
+        
+        return odom

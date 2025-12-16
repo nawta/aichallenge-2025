@@ -5,11 +5,18 @@
     model:
       input_dim: 1080            # LiDARスキャンの入力次元
       output_dim: 2              # 出力（steering, throttleなど）
-      architecture: "large"       # "large", "small", または "deep"
+      state_dim: 13              # kinematic state の次元
+      seq_len: 10                # シーケンス長（時系列モデル用）
+      hidden_size: 128           # 隠れ層サイズ（BiLSTM, TCN用）
+      # アーキテクチャ選択:
+      # "large", "small", "deep" - 単一フレームモデル
+      # "fusion" - 単一フレーム + odometry
+      # "stacked", "bilstm", "tcn" - 時系列モデル
+      architecture: "large"
       ckpt_path: "/path/to/tinylidarnet_weights.npy"
 
     max_range: 30.0              # LiDARの最大レンジ（メートル）
-    control_mode: "fixed"          # "ai" または "fixed"
+    control_mode: "fixed"        # "ai" または "fixed"
     acceleration: 1.0            # 固定加速度コマンド mode:fixed の場合に使用
 
     debug: false

@@ -7,14 +7,25 @@ data:
   augment_prob: 0.5        # 50%の確率で反転
 
 model:
-  # "TinyLidarNet", "TinyLidarNetSmall", "TinyLidarNetDeep", または "TinyLidarNetFusion"
+  # "TinyLidarNet", "TinyLidarNetSmall", "TinyLidarNetDeep", "TinyLidarNetFusion",
+  # "TinyLidarNetStacked", "TinyLidarNetBiLSTM", "TinyLidarNetTCN"
   name: "TinyLidarNet"
   # LiDARのスキャン点数
   input_dim: 1080
   # 出力次元（[accel, steer]）
   output_dim: 2
-  # kinematic state の次元（Fusionモデル用）
+  # kinematic state の次元
   state_dim: 13
+  
+  # === 時系列モデル用パラメータ ===
+  # シーケンス長（Stacked, BiLSTM, TCN用）
+  seq_len: 10
+  # 隠れ層サイズ（BiLSTM, TCN用）
+  hidden_size: 128
+  # TCN用パラメータ
+  tcn_levels: 3
+  tcn_kernel_size: 3
+  tcn_causal: false  # 学習時はnon-causal（未来も見る）
 
 train:
   batch_size: 64

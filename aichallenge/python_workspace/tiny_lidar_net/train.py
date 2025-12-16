@@ -8,9 +8,15 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 
-from lib.model import TinyLidarNet, TinyLidarNetSmall, TinyLidarNetDeep, TinyLidarNetFusion
+from lib.model import (
+    TinyLidarNet, TinyLidarNetSmall, TinyLidarNetDeep, TinyLidarNetFusion,
+    TinyLidarNetStacked, TinyLidarNetBiLSTM, TinyLidarNetTCN
+)
 from lib.data import MultiSeqConcatDataset
 from lib.loss import WeightedSmoothL1Loss
+
+# Temporal model names
+TEMPORAL_MODELS = ["TinyLidarNetStacked", "TinyLidarNetBiLSTM", "TinyLidarNetTCN"]
 
 
 
@@ -30,11 +36,20 @@ def main(cfg: DictConfig):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Check if using fusion model (requires odometry data)
-    use_fusion = cfg.model.name == "TinyLidarNetFusion"
-    use_odom = use_fusion or cfg.model.get("use_odom", False)
+    # Check model type
+    model_name = cfg.model.name
+    is_temporal = model_name in TEMPORAL_MODELS
+    use_fusion = model_name == "TinyLidarNetFusion"
     
-    if use_fusion:
+    # Temporal models and Fusion model require odometry data
+    use_odom = is_temporal or use_fusion or cfg.model.get("use_odom", False)
+    
+    # Sequence length for temporal models
+    seq_len = cfg.model.get("seq_len", 10) if is_temporal else 1
+    
+    if is_temporal:
+        print(f"[INFO] Using temporal model: {model_name} with seq_len={seq_len}")
+    elif use_fusion:
         print("[INFO] Using TinyLidarNetFusion - loading odometry data")
 
     # Data augmentation settings (defaults: ON)
@@ -51,6 +66,7 @@ def main(cfg: DictConfig):
     train_dataset = MultiSeqConcatDataset(
         cfg.data.train_dir, 
         use_odom=use_odom,
+        seq_len=seq_len,
         augment_mirror=augment_mirror,
         augment_prob=augment_prob
     )
@@ -58,6 +74,7 @@ def main(cfg: DictConfig):
     val_dataset = MultiSeqConcatDataset(
         cfg.data.val_dir, 
         use_odom=use_odom,
+        seq_len=seq_len,
         augment_mirror=False,
         augment_prob=0.0
     )
@@ -81,21 +98,50 @@ def main(cfg: DictConfig):
     )
 
     # === Model ===
-    if cfg.model.name == "TinyLidarNetSmall":
+    state_dim = cfg.model.get("state_dim", 13)
+    hidden_size = cfg.model.get("hidden_size", 128)
+    
+    if model_name == "TinyLidarNetSmall":
         model = TinyLidarNetSmall(
             input_dim=cfg.model.input_dim,
             output_dim=cfg.model.output_dim
         ).to(device)
-    elif cfg.model.name == "TinyLidarNetDeep":
+    elif model_name == "TinyLidarNetDeep":
         model = TinyLidarNetDeep(
             input_dim=cfg.model.input_dim,
             output_dim=cfg.model.output_dim
         ).to(device)
-    elif cfg.model.name == "TinyLidarNetFusion":
-        state_dim = cfg.model.get("state_dim", 13)
+    elif model_name == "TinyLidarNetFusion":
         model = TinyLidarNetFusion(
             input_dim=cfg.model.input_dim,
             state_dim=state_dim,
+            output_dim=cfg.model.output_dim
+        ).to(device)
+    elif model_name == "TinyLidarNetStacked":
+        model = TinyLidarNetStacked(
+            input_dim=cfg.model.input_dim,
+            state_dim=state_dim,
+            seq_len=seq_len,
+            output_dim=cfg.model.output_dim
+        ).to(device)
+    elif model_name == "TinyLidarNetBiLSTM":
+        model = TinyLidarNetBiLSTM(
+            input_dim=cfg.model.input_dim,
+            state_dim=state_dim,
+            hidden_size=hidden_size,
+            output_dim=cfg.model.output_dim
+        ).to(device)
+    elif model_name == "TinyLidarNetTCN":
+        num_levels = cfg.model.get("tcn_levels", 3)
+        kernel_size = cfg.model.get("tcn_kernel_size", 3)
+        causal = cfg.model.get("tcn_causal", False)  # Non-causal for training (sees future)
+        model = TinyLidarNetTCN(
+            input_dim=cfg.model.input_dim,
+            state_dim=state_dim,
+            hidden_size=hidden_size,
+            num_levels=num_levels,
+            kernel_size=kernel_size,
+            causal=causal,
             output_dim=cfg.model.output_dim
         ).to(device)
     else:
@@ -136,7 +182,25 @@ def main(cfg: DictConfig):
             train_loss = 0.0
 
             for batch in tqdm(train_loader, desc=f"[Train] Epoch {epoch+1}/{cfg.train.epochs}"):
-                if use_odom:
+                if is_temporal:
+                    # Temporal models: (scans, odoms, targets) with sequence data
+                    scans, odoms, targets = batch
+                    # scans: (batch, seq_len, scan_dim)
+                    # odoms: (batch, seq_len, state_dim)
+                    scans = scans.to(device)
+                    odoms = odoms.to(device)
+                    targets = targets.to(device)
+                    
+                    scans = clean_numerical_tensor(scans)
+                    odoms = clean_numerical_tensor(odoms)
+                    targets = clean_numerical_tensor(targets)
+                    
+                    if model_name == "TinyLidarNetBiLSTM":
+                        # Use bidirectional during training
+                        outputs = model(scans, odoms, use_bidirectional=True)
+                    else:
+                        outputs = model(scans, odoms)
+                elif use_odom:
                     # Fusion model: (scans, odom, targets)
                     scans, odom, targets = batch
                     scans = scans.unsqueeze(1).to(device)
@@ -167,7 +231,10 @@ def main(cfg: DictConfig):
                 train_loss += loss.item()
 
             avg_train_loss = train_loss / len(train_loader)
-            avg_val_loss = validate(model, val_loader, device, criterion, use_odom=use_odom)
+            avg_val_loss = validate(
+                model, val_loader, device, criterion, 
+                use_odom=use_odom, is_temporal=is_temporal, model_name=model_name
+            )
 
             print(f"Epoch {epoch+1:03d}: Train={avg_train_loss:.4f} | Val={avg_val_loss:.4f}")
             writer.add_scalar("Loss/train", avg_train_loss, epoch + 1)
@@ -189,12 +256,31 @@ def main(cfg: DictConfig):
     print("Training finished.")
 
 
-def validate(model, loader, device, criterion, use_odom: bool = False):
+def validate(
+    model, loader, device, criterion, 
+    use_odom: bool = False, is_temporal: bool = False, model_name: str = ""
+):
     model.eval()
     total_loss = 0.0
     with torch.no_grad():
         for batch in tqdm(loader, desc="[Val]", leave=False):
-            if use_odom:
+            if is_temporal:
+                # Temporal models: (scans, odoms, targets)
+                scans, odoms, targets = batch
+                scans = scans.to(device)
+                odoms = odoms.to(device)
+                targets = targets.to(device)
+                
+                scans = clean_numerical_tensor(scans)
+                odoms = clean_numerical_tensor(odoms)
+                targets = clean_numerical_tensor(targets)
+                
+                if model_name == "TinyLidarNetBiLSTM":
+                    # Use bidirectional during validation too (same as training)
+                    outputs = model(scans, odoms, use_bidirectional=True)
+                else:
+                    outputs = model(scans, odoms)
+            elif use_odom:
                 # Fusion model: (scans, odom, targets)
                 scans, odom, targets = batch
                 scans = scans.unsqueeze(1).to(device)

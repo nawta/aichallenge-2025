@@ -16,8 +16,10 @@ class ExtractionConfig:
     """Configuration parameters for data extraction."""
     control_topic: str
     scan_topic: str
+    odom_topic: str = '/localization/kinematic_state'
     control_msg_type: str = 'autoware_auto_control_msgs/msg/AckermannControlCommand'
     scan_msg_type: str = 'sensor_msgs/msg/LaserScan'
+    odom_msg_type: str = 'nav_msgs/msg/Odometry'
     max_scan_range: float = 30.0
 
 
@@ -120,6 +122,44 @@ def synchronize_data(src_times: np.ndarray, target_times: np.ndarray) -> Tuple[n
     return final_indices, final_deltas
 
 
+def extract_odom_features(msg) -> np.ndarray:
+    """
+    Extract kinematic state features from Odometry message.
+    
+    Returns a 13-dimensional feature vector:
+    - position (x, y, z): 3
+    - orientation (x, y, z, w): 4
+    - linear_velocity (x, y, z): 3
+    - angular_velocity (x, y, z): 3
+    
+    Args:
+        msg: nav_msgs/Odometry message
+        
+    Returns:
+        np.ndarray of shape (13,) with float32 dtype
+    """
+    features = np.array([
+        # Position
+        msg.pose.pose.position.x,
+        msg.pose.pose.position.y,
+        msg.pose.pose.position.z,
+        # Orientation (quaternion)
+        msg.pose.pose.orientation.x,
+        msg.pose.pose.orientation.y,
+        msg.pose.pose.orientation.z,
+        msg.pose.pose.orientation.w,
+        # Linear velocity
+        msg.twist.twist.linear.x,
+        msg.twist.twist.linear.y,
+        msg.twist.twist.linear.z,
+        # Angular velocity
+        msg.twist.twist.angular.x,
+        msg.twist.twist.angular.y,
+        msg.twist.twist.angular.z,
+    ], dtype=np.float32)
+    return features
+
+
 def process_bag(
     bag_path: Path, 
     output_root: Path, 
@@ -129,6 +169,7 @@ def process_bag(
     """
     Worker function to process a single ROS bag file.
     Reads, cleans, synchronizes, and saves the data.
+    Now includes odometry (kinematic_state) extraction.
     """
     logger = logging.getLogger(__name__)
     bag_name = bag_path.name
@@ -141,12 +182,14 @@ def process_bag(
     cmd_times: List[int] = []
     scan_data: List[np.ndarray] = []
     scan_times: List[int] = []
+    odom_data: List[np.ndarray] = []
+    odom_times: List[int] = []
 
     # --- 1. Read Bag File ---
     t_start_read = time.perf_counter()
     try:
         with AnyReader([bag_path]) as reader:
-            target_topics = [config.control_topic, config.scan_topic]
+            target_topics = [config.control_topic, config.scan_topic, config.odom_topic]
             connections = [c for c in reader.connections if c.topic in target_topics]
             
             if not connections:
@@ -172,6 +215,14 @@ def process_bag(
                             scan_vec = clean_scan_array(ranges, config.max_scan_range)
                             scan_data.append(scan_vec)
                             scan_times.append(timestamp)
+                    
+                    # Extract Odometry (kinematic_state)
+                    elif conn.topic == config.odom_topic:
+                        if conn.msgtype == config.odom_msg_type:
+                            odom_features = extract_odom_features(msg)
+                            odom_data.append(odom_features)
+                            odom_times.append(timestamp)
+                            
                 except Exception:
                     continue
     except Exception as e:
@@ -181,7 +232,7 @@ def process_bag(
     t_end_read = time.perf_counter()
 
     if not cmd_data or not scan_data:
-        if debug: logger.warning(f"Skipping {bag_name}: Insufficient data.")
+        if debug: logger.warning(f"Skipping {bag_name}: Insufficient data (scan/cmd).")
         return
 
     # Convert lists to NumPy arrays for efficient processing
@@ -189,20 +240,40 @@ def process_bag(
     np_cmd_times = np.array(cmd_times, dtype=np.int64)
     np_scan_data = np.array(scan_data, dtype=np.float32)
     np_scan_times = np.array(scan_times, dtype=np.int64)
+    
+    # Handle odometry data (may be empty if topic not present)
+    has_odom = len(odom_data) > 0
+    if has_odom:
+        np_odom_data = np.array(odom_data, dtype=np.float32)
+        np_odom_times = np.array(odom_times, dtype=np.int64)
+    else:
+        if debug: logger.warning(f"{bag_name}: No odometry data found, will save zeros.")
 
     # --- 2. Synchronize Data ---
     t_start_sync = time.perf_counter()
     
-    # searchsorted requires the target array to be sorted
+    # Sort control data by timestamp (searchsorted requires sorted array)
     sort_idx = np.argsort(np_cmd_times)
     np_cmd_times = np_cmd_times[sort_idx]
     np_cmd_data = np_cmd_data[sort_idx]
 
-    indices, deltas = synchronize_data(np_scan_times, np_cmd_times)
-
-    synced_cmds = np_cmd_data[indices]
+    # Synchronize control to scan timestamps
+    cmd_indices, cmd_deltas = synchronize_data(np_scan_times, np_cmd_times)
+    synced_cmds = np_cmd_data[cmd_indices]
     synced_steers = synced_cmds[:, 0]
     synced_accels = synced_cmds[:, 1]
+    
+    # Synchronize odometry to scan timestamps
+    if has_odom:
+        sort_idx_odom = np.argsort(np_odom_times)
+        np_odom_times = np_odom_times[sort_idx_odom]
+        np_odom_data = np_odom_data[sort_idx_odom]
+        
+        odom_indices, odom_deltas = synchronize_data(np_scan_times, np_odom_times)
+        synced_odom = np_odom_data[odom_indices]
+    else:
+        # Create zero array with 13 features if no odom data
+        synced_odom = np.zeros((len(np_scan_data), 13), dtype=np.float32)
     
     t_end_sync = time.perf_counter()
 
@@ -212,33 +283,45 @@ def process_bag(
     np.save(out_dir / 'scans.npy', np_scan_data)
     np.save(out_dir / 'steers.npy', synced_steers)
     np.save(out_dir / 'accelerations.npy', synced_accels)
+    np.save(out_dir / 'odom.npy', synced_odom)
     
     # Save delta times only when debugging to save disk space/IO
     if debug:
-        delta_seconds = deltas / 1e9
+        delta_seconds = cmd_deltas / 1e9
         np.save(out_dir / 'delta_times.npy', delta_seconds)
+        if has_odom:
+            odom_delta_seconds = odom_deltas / 1e9
+            np.save(out_dir / 'odom_delta_times.npy', odom_delta_seconds)
     
     t_end_save = time.perf_counter()
     duration_total = t_end_save - t_start_total
 
     # Log successful processing
-    logger.info(f"Saved {bag_name}: {len(np_scan_data)} samples (Total: {duration_total:.2f}s)")
+    odom_status = f"odom={len(odom_data)}" if has_odom else "odom=zeros"
+    logger.info(f"Saved {bag_name}: {len(np_scan_data)} samples ({odom_status}) (Total: {duration_total:.2f}s)")
 
     if debug:
         duration_read = t_end_read - t_start_read
         duration_sync = t_end_sync - t_start_sync
         duration_save = t_end_save - t_start_save
-        delta_seconds = deltas / 1e9
+        delta_seconds = cmd_deltas / 1e9
         
         logger.debug(
             f"  [Performance {bag_name}]\n"
             f"    - Read : {duration_read:.4f}s\n"
             f"    - Sync : {duration_sync:.4f}s\n"
             f"    - Save : {duration_save:.4f}s\n"
-            f"  [Sync Stats]\n"
+            f"  [Sync Stats - Control]\n"
             f"    - Δt Mean: {delta_seconds.mean():.6f}s\n"
             f"    - Δt Max : {delta_seconds.max():.6f}s"
         )
+        if has_odom:
+            odom_delta_seconds = odom_deltas / 1e9
+            logger.debug(
+                f"  [Sync Stats - Odom]\n"
+                f"    - Δt Mean: {odom_delta_seconds.mean():.6f}s\n"
+                f"    - Δt Max : {odom_delta_seconds.max():.6f}s"
+            )
 
 
 def main():
@@ -256,6 +339,7 @@ def main():
     # Topic configuration
     parser.add_argument('--control-topic', type=str, default='/awsim/control_cmd', help='Topic name for control commands.')
     parser.add_argument('--scan-topic', type=str, default='/sensing/lidar/scan', help='Topic name for LiDAR scans.')
+    parser.add_argument('--odom-topic', type=str, default='/localization/kinematic_state', help='Topic name for odometry (kinematic state).')
     
     # Performance arguments
     default_workers = min(os.cpu_count() or 1, 8)
@@ -291,7 +375,11 @@ def main():
     logger.info(f"Found {len(bag_dirs)} bags. Starting processing with {num_workers} workers.")
 
     # --- Processing Phase ---
-    config = ExtractionConfig(control_topic=args.control_topic, scan_topic=args.scan_topic)
+    config = ExtractionConfig(
+        control_topic=args.control_topic, 
+        scan_topic=args.scan_topic,
+        odom_topic=args.odom_topic
+    )
     tasks = [(p, args.outdir, config, args.debug) for p in bag_dirs]
 
     start_time = time.time()

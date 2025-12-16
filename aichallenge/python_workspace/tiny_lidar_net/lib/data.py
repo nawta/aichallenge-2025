@@ -60,11 +60,13 @@ class ScanControlSequenceDataset(Dataset):
     
     Optionally loads odometry (kinematic state) data if use_odom=True.
     Supports mirror augmentation for data augmentation during training.
+    Supports temporal sequence mode with seq_len > 1.
 
     Attributes:
         seq_dir (Path): Path to the sequence directory.
         max_range (float): Maximum range for LiDAR normalization.
         use_odom (bool): Whether to load and return odometry data.
+        seq_len (int): Number of frames in each sequence (1 for single-frame mode).
         augment_mirror (bool): Whether to apply mirror augmentation.
         augment_prob (float): Probability of applying mirror augmentation.
         scans (np.ndarray): Normalized scan data array (N, num_points).
@@ -78,6 +80,7 @@ class ScanControlSequenceDataset(Dataset):
         seq_dir: Union[str, Path], 
         max_range: float = 30.0,
         use_odom: bool = False,
+        seq_len: int = 1,
         augment_mirror: bool = True,
         augment_prob: float = 0.5
     ):
@@ -88,6 +91,8 @@ class ScanControlSequenceDataset(Dataset):
             seq_dir: Path to the directory containing .npy files.
             max_range: Maximum range value to normalize LiDAR data (0.0 to 1.0).
             use_odom: Whether to load odometry data (default: False for backward compatibility).
+            seq_len: Number of frames per sequence (default: 1 for single-frame mode).
+                     When > 1, returns sequences of consecutive frames.
             augment_mirror: Whether to apply mirror augmentation (default: True).
             augment_prob: Probability of applying mirror augmentation (default: 0.5).
 
@@ -97,6 +102,7 @@ class ScanControlSequenceDataset(Dataset):
         self.seq_dir = Path(seq_dir)
         self.max_range = max_range
         self.use_odom = use_odom
+        self.seq_len = seq_len
         self.augment_mirror = augment_mirror
         self.augment_prob = augment_prob
 
@@ -137,7 +143,8 @@ class ScanControlSequenceDataset(Dataset):
                 self.odom = np.zeros((n_samples, 13), dtype=np.float32)
 
     def __len__(self) -> int:
-        return len(self.scans)
+        # Reduce length to account for sequence window
+        return len(self.scans) - self.seq_len + 1
 
     def __getitem__(self, idx: int) -> Tuple[np.ndarray, ...]:
         """
@@ -147,32 +154,63 @@ class ScanControlSequenceDataset(Dataset):
             idx: Index of the sample to retrieve.
 
         Returns:
-            If use_odom=False: (scan, target)
-            If use_odom=True: (scan, odom, target)
+            Single-frame mode (seq_len=1):
+                If use_odom=False: (scan, target)
+                If use_odom=True: (scan, odom, target)
             
-            scan: Normalized LiDAR scan data (float32).
-            odom: Normalized kinematic state features (float32), 13 dimensions.
-            target: Control command vector [acceleration, steering] (float32).
+            Sequence mode (seq_len>1):
+                If use_odom=False: (scans, target)
+                If use_odom=True: (scans, odoms, target)
+            
+            scan(s): Normalized LiDAR scan data (float32).
+                     Shape: (scan_dim,) for single-frame, (seq_len, scan_dim) for sequence.
+            odom(s): Normalized kinematic state features (float32).
+                     Shape: (13,) for single-frame, (seq_len, 13) for sequence.
+            target: Control command vector [acceleration, steering] (float32) at the last frame.
         """
-        # Ensure data is float32 for PyTorch compatibility
-        scan = self.scans[idx].astype(np.float32)
+        # Determine if using mirror augmentation for this sample
+        apply_mirror = self.augment_mirror and np.random.random() < self.augment_prob
         
-        accel = np.float32(self.accels[idx])
-        steer = np.float32(self.steers[idx])
-        
-        # Mirror Augmentation: flip scan and negate steering
-        if self.augment_mirror and np.random.random() < self.augment_prob:
-            scan = np.flip(scan).copy()
-            steer = -steer
-        
-        # Target vector construction: [Acceleration, Steering]
-        target = np.array([accel, steer], dtype=np.float32)
-        
-        if self.use_odom:
-            odom = self.odom[idx].astype(np.float32)
-            return scan, odom, target
+        if self.seq_len > 1:
+            # Sequence mode: return seq_len consecutive frames
+            end_idx = idx + self.seq_len
+            scans = self.scans[idx:end_idx].astype(np.float32)  # (seq_len, scan_dim)
+            
+            # Target is at the last frame
+            accel = np.float32(self.accels[end_idx - 1])
+            steer = np.float32(self.steers[end_idx - 1])
+            
+            # Mirror Augmentation: flip all scans and negate steering
+            if apply_mirror:
+                scans = np.flip(scans, axis=1).copy()
+                steer = -steer
+            
+            target = np.array([accel, steer], dtype=np.float32)
+            
+            if self.use_odom:
+                odoms = self.odom[idx:end_idx].astype(np.float32)  # (seq_len, 13)
+                return scans, odoms, target
+            else:
+                return scans, target
         else:
-            return scan, target
+            # Single-frame mode (original behavior)
+            scan = self.scans[idx].astype(np.float32)
+            
+            accel = np.float32(self.accels[idx])
+            steer = np.float32(self.steers[idx])
+            
+            # Mirror Augmentation: flip scan and negate steering
+            if apply_mirror:
+                scan = np.flip(scan).copy()
+                steer = -steer
+            
+            target = np.array([accel, steer], dtype=np.float32)
+            
+            if self.use_odom:
+                odom = self.odom[idx].astype(np.float32)
+                return scan, odom, target
+            else:
+                return scan, target
 
 
 class MultiSeqConcatDataset(ConcatDataset):
@@ -182,6 +220,7 @@ class MultiSeqConcatDataset(ConcatDataset):
     Automatically discovers valid sequence directories within a root directory.
     Supports filtering sequences using inclusion and exclusion keywords.
     Supports mirror augmentation for data augmentation during training.
+    Supports temporal sequence mode with seq_len > 1.
     """
 
     def __init__(
@@ -189,6 +228,7 @@ class MultiSeqConcatDataset(ConcatDataset):
         dataset_root: Union[str, Path], 
         max_range: float = 30.0, 
         use_odom: bool = False,
+        seq_len: int = 1,
         augment_mirror: bool = True,
         augment_prob: float = 0.5,
         include: Optional[List[str]] = None, 
@@ -201,6 +241,7 @@ class MultiSeqConcatDataset(ConcatDataset):
             dataset_root: Root directory containing sequence folders.
             max_range: Maximum range for LiDAR normalization.
             use_odom: Whether to load odometry data (default: False).
+            seq_len: Number of frames per sequence (default: 1 for single-frame mode).
             augment_mirror: Whether to apply mirror augmentation (default: True).
             augment_prob: Probability of applying mirror augmentation (default: 0.5).
             include: List of substrings; if provided, only directories containing
@@ -242,6 +283,7 @@ class MultiSeqConcatDataset(ConcatDataset):
                         seq_dir, 
                         max_range=max_range,
                         use_odom=use_odom,
+                        seq_len=seq_len,
                         augment_mirror=augment_mirror,
                         augment_prob=augment_prob
                     )
@@ -256,5 +298,6 @@ class MultiSeqConcatDataset(ConcatDataset):
 
         super().__init__(datasets)
         odom_status = "with odom" if use_odom else "without odom"
+        seq_status = f"seq_len={seq_len}" if seq_len > 1 else "single-frame"
         aug_status = f"mirror_aug={augment_mirror}(p={augment_prob})" if augment_mirror else "no_aug"
-        logger.info(f"Loaded {len(datasets)} sequences {odom_status} {aug_status} from {dataset_root}. Total samples: {len(self)}")
+        logger.info(f"Loaded {len(datasets)} sequences {odom_status} {seq_status} {aug_status} from {dataset_root}. Total samples: {len(self)}")

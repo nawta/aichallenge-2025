@@ -6,7 +6,7 @@
 
 | 日付 | ファイル | 概要 |
 |------|---------|------|
-| 2025-12-17 | [2025-12-17_development.md](./2025-12-17_development.md) | TinyLidarNetDeepモデルの追加 |
+| 2025-12-17 | [2025-12-17_development.md](./2025-12-17_development.md) | TinyLidarNetDeepモデル、Rosbagクロップ、Data Augmentation、Temporal Models |
 
 ## ログの書き方
 
