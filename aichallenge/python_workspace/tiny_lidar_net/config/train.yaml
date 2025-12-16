@@ -2,14 +2,19 @@ data:
   # データセットのディレクトリパス
   train_dir: "/aichallenge/python_workspace/tiny_lidar_net/dataset/train"
   val_dir: "/aichallenge/python_workspace/tiny_lidar_net/dataset/val"
+  # Data Augmentation (トグル可能、デフォルトON)
+  augment_mirror: true     # false にすると無効化
+  augment_prob: 0.5        # 50%の確率で反転
 
 model:
-  # "TinyLidarNet", "TinyLidarNetSmall", または "TinyLidarNetDeep"
+  # "TinyLidarNet", "TinyLidarNetSmall", "TinyLidarNetDeep", または "TinyLidarNetFusion"
   name: "TinyLidarNet"
   # LiDARのスキャン点数
   input_dim: 1080
   # 出力次元（[accel, steer]）
   output_dim: 2
+  # kinematic state の次元（Fusionモデル用）
+  state_dim: 13
 
 train:
   batch_size: 64

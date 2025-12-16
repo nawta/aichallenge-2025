@@ -8,7 +8,7 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 
-from lib.model import TinyLidarNet, TinyLidarNetSmall, TinyLidarNetDeep
+from lib.model import TinyLidarNet, TinyLidarNetSmall, TinyLidarNetDeep, TinyLidarNetFusion
 from lib.data import MultiSeqConcatDataset
 from lib.loss import WeightedSmoothL1Loss
 
@@ -30,9 +30,37 @@ def main(cfg: DictConfig):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    # Check if using fusion model (requires odometry data)
+    use_fusion = cfg.model.name == "TinyLidarNetFusion"
+    use_odom = use_fusion or cfg.model.get("use_odom", False)
+    
+    if use_fusion:
+        print("[INFO] Using TinyLidarNetFusion - loading odometry data")
+
+    # Data augmentation settings (defaults: ON)
+    augment_mirror = cfg.data.get("augment_mirror", True)
+    augment_prob = cfg.data.get("augment_prob", 0.5)
+    
+    if augment_mirror:
+        print(f"[INFO] Mirror augmentation enabled (prob={augment_prob})")
+    else:
+        print("[INFO] Mirror augmentation disabled")
+
     # === Dataset ===
-    train_dataset = MultiSeqConcatDataset(cfg.data.train_dir)
-    val_dataset = MultiSeqConcatDataset(cfg.data.val_dir)
+    # Training data: apply augmentation based on config
+    train_dataset = MultiSeqConcatDataset(
+        cfg.data.train_dir, 
+        use_odom=use_odom,
+        augment_mirror=augment_mirror,
+        augment_prob=augment_prob
+    )
+    # Validation data: no augmentation for fair evaluation
+    val_dataset = MultiSeqConcatDataset(
+        cfg.data.val_dir, 
+        use_odom=use_odom,
+        augment_mirror=False,
+        augment_prob=0.0
+    )
 
     train_loader = DataLoader(
         train_dataset,
@@ -61,6 +89,13 @@ def main(cfg: DictConfig):
     elif cfg.model.name == "TinyLidarNetDeep":
         model = TinyLidarNetDeep(
             input_dim=cfg.model.input_dim,
+            output_dim=cfg.model.output_dim
+        ).to(device)
+    elif cfg.model.name == "TinyLidarNetFusion":
+        state_dim = cfg.model.get("state_dim", 13)
+        model = TinyLidarNetFusion(
+            input_dim=cfg.model.input_dim,
+            state_dim=state_dim,
             output_dim=cfg.model.output_dim
         ).to(device)
     else:
@@ -100,14 +135,30 @@ def main(cfg: DictConfig):
             model.train()
             train_loss = 0.0
 
-            for scans, targets in tqdm(train_loader, desc=f"[Train] Epoch {epoch+1}/{cfg.train.epochs}"):
-                scans = scans.unsqueeze(1).to(device)
-                targets = targets.to(device)
+            for batch in tqdm(train_loader, desc=f"[Train] Epoch {epoch+1}/{cfg.train.epochs}"):
+                if use_odom:
+                    # Fusion model: (scans, odom, targets)
+                    scans, odom, targets = batch
+                    scans = scans.unsqueeze(1).to(device)
+                    odom = odom.to(device)
+                    targets = targets.to(device)
+                    
+                    scans = clean_numerical_tensor(scans)
+                    odom = clean_numerical_tensor(odom)
+                    targets = clean_numerical_tensor(targets)
+                    
+                    outputs = model(scans, odom)
+                else:
+                    # Standard model: (scans, targets)
+                    scans, targets = batch
+                    scans = scans.unsqueeze(1).to(device)
+                    targets = targets.to(device)
 
-                scans = clean_numerical_tensor(scans)
-                targets = clean_numerical_tensor(targets)
+                    scans = clean_numerical_tensor(scans)
+                    targets = clean_numerical_tensor(targets)
 
-                outputs = model(scans)
+                    outputs = model(scans)
+                
                 loss = criterion(outputs, targets)
 
                 optimizer.zero_grad()
@@ -116,7 +167,7 @@ def main(cfg: DictConfig):
                 train_loss += loss.item()
 
             avg_train_loss = train_loss / len(train_loader)
-            avg_val_loss = validate(model, val_loader, device, criterion)
+            avg_val_loss = validate(model, val_loader, device, criterion, use_odom=use_odom)
 
             print(f"Epoch {epoch+1:03d}: Train={avg_train_loss:.4f} | Val={avg_val_loss:.4f}")
             writer.add_scalar("Loss/train", avg_train_loss, epoch + 1)
@@ -138,16 +189,34 @@ def main(cfg: DictConfig):
     print("Training finished.")
 
 
-def validate(model, loader, device, criterion):
+def validate(model, loader, device, criterion, use_odom: bool = False):
     model.eval()
     total_loss = 0.0
     with torch.no_grad():
-        for scans, targets in tqdm(loader, desc="[Val]", leave=False):
-            scans = scans.unsqueeze(1).to(device)
-            targets = targets.to(device)
-            scans = clean_numerical_tensor(scans)
-            targets = clean_numerical_tensor(targets)
-            outputs = model(scans)
+        for batch in tqdm(loader, desc="[Val]", leave=False):
+            if use_odom:
+                # Fusion model: (scans, odom, targets)
+                scans, odom, targets = batch
+                scans = scans.unsqueeze(1).to(device)
+                odom = odom.to(device)
+                targets = targets.to(device)
+                
+                scans = clean_numerical_tensor(scans)
+                odom = clean_numerical_tensor(odom)
+                targets = clean_numerical_tensor(targets)
+                
+                outputs = model(scans, odom)
+            else:
+                # Standard model: (scans, targets)
+                scans, targets = batch
+                scans = scans.unsqueeze(1).to(device)
+                targets = targets.to(device)
+                
+                scans = clean_numerical_tensor(scans)
+                targets = clean_numerical_tensor(targets)
+                
+                outputs = model(scans)
+            
             loss = criterion(outputs, targets)
             total_loss += loss.item()
     return total_loss / len(loader)
