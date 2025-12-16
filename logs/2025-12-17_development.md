@@ -433,10 +433,95 @@ self.h, self.c = self._lstm_step(features, self.h, self.c)
 
 ---
 
+## 🌙 一括学習スクリプト
+
+### 背景
+全モデル（7種類）をaugmented版・non-augmented版の両方で学習すると14回の学習が必要。
+寝ている間に全モデルを学習し、朝起きたら全checkpointが揃っている状態にしたい。
+
+### 作成したスクリプト
+
+| ファイル | 説明 |
+|---------|------|
+| `train_all_models.sh` | Bash版（シンプル） |
+| `train_all_models.py` | Python版（オプション豊富） |
+
+### 学習されるモデル（14種類）
+
+| モデル | Augmented | Non-Augmented |
+|--------|-----------|---------------|
+| TinyLidarNet | ✅ | ✅ |
+| TinyLidarNetSmall | ✅ | ✅ |
+| TinyLidarNetDeep | ✅ | ✅ |
+| TinyLidarNetFusion | ✅ | ✅ |
+| TinyLidarNetStacked | ✅ | ✅ |
+| TinyLidarNetBiLSTM | ✅ | ✅ |
+| TinyLidarNetTCN | ✅ | ✅ |
+
+### 使用方法
+
+```bash
+# Dockerコンテナ内で実行
+cd /aichallenge/python_workspace/tiny_lidar_net
+
+# GPU使用（推奨）
+./train_all_models.sh
+
+# CPUのみ（RTX 50シリーズ等）
+./train_all_models.sh --cpu
+
+# Python版（より柔軟）
+python3 train_all_models.py --epochs 50 --models TinyLidarNet TinyLidarNetDeep
+```
+
+### 出力構造
+
+```
+checkpoints/
+├── TinyLidarNet_aug/
+│   ├── best_model.pth
+│   └── last_model.pth
+├── TinyLidarNet_noaug/
+├── TinyLidarNetDeep_aug/
+└── ...
+
+weights/
+├── TinyLidarNet_aug.npy      # 推論用（変換済み）
+├── TinyLidarNet_noaug.npy
+└── ...
+
+training_logs/
+├── TinyLidarNet_aug_20251217_xxxx.log
+├── summary_20251217_xxxx.txt  # 全体サマリー
+└── ...
+```
+
+### 結果確認
+
+```bash
+# 朝起きたら
+cat /aichallenge/python_workspace/tiny_lidar_net/training_logs/summary_*.txt
+
+# 変換済み重みの確認
+ls -la /aichallenge/python_workspace/tiny_lidar_net/weights/*.npy
+```
+
+### スクリプトの特徴
+
+- ✅ 学習後に自動で重み変換（.pth → .npy）
+- ✅ 各モデルの学習ログを個別ファイルに保存
+- ✅ 全体のサマリーを生成
+- ✅ エラー時も次のモデルの学習を継続
+- ✅ CPU/GPU切り替え対応
+
+---
+
 ## 📝 コミット履歴
 
 | Hash | メッセージ |
 |------|----------|
+| `5f8178d` | feat(tiny_lidar_net): add overnight training script for all models |
+| `63a1b57` | feat(tiny_lidar_net): add temporal models (Stacked, BiLSTM, TCN) |
 | `0eb182c` | feat(tiny_lidar_net): add mirror augmentation and fusion model support |
 
 ---
