@@ -166,3 +166,56 @@ def softmax(x):
     x_max = np.max(x, axis=1, keepdims=True)
     exps = np.exp(x - x_max)
     return exps / np.sum(exps, axis=1, keepdims=True)
+
+
+def conv1d_padded(x, weight, bias, stride=1, padding=0):
+    """Applies a 1D convolution with optional padding.
+
+    Args:
+        x (np.ndarray): Input array of shape (batch_size, in_channels, length).
+        weight (np.ndarray): Filters of shape (out_channels, in_channels, kernel_size).
+        bias (np.ndarray): Bias vector of shape (out_channels,).
+        stride (int): The stride of the convolving kernel. Defaults to 1.
+        padding (int): Zero-padding added to both sides. Defaults to 0.
+
+    Returns:
+        np.ndarray: The output of the convolution.
+    """
+    if padding > 0:
+        x = np.pad(x, ((0, 0), (0, 0), (padding, padding)), mode='constant', constant_values=0)
+    return conv1d(x, weight, bias, stride)
+
+
+def batch_norm1d(x, weight, bias, running_mean, running_var, eps=1e-5):
+    """Applies Batch Normalization over a 1D input (mini-batch of 1D inputs).
+
+    Uses running statistics for inference mode (eval mode).
+
+    Args:
+        x (np.ndarray): Input array of shape (batch_size, num_features) or 
+                        (batch_size, channels, length).
+        weight (np.ndarray): Learnable scale parameter (gamma) of shape (num_features,).
+        bias (np.ndarray): Learnable shift parameter (beta) of shape (num_features,).
+        running_mean (np.ndarray): Running mean of shape (num_features,).
+        running_var (np.ndarray): Running variance of shape (num_features,).
+        eps (float): Small constant for numerical stability. Defaults to 1e-5.
+
+    Returns:
+        np.ndarray: Normalized output of the same shape as input.
+    """
+    if x.ndim == 3:
+        # Input shape: (batch, channels, length)
+        # Reshape parameters for broadcasting
+        mean = running_mean.reshape(1, -1, 1)
+        var = running_var.reshape(1, -1, 1)
+        gamma = weight.reshape(1, -1, 1)
+        beta = bias.reshape(1, -1, 1)
+    else:
+        # Input shape: (batch, features)
+        mean = running_mean
+        var = running_var
+        gamma = weight
+        beta = bias
+    
+    x_norm = (x - mean) / np.sqrt(var + eps)
+    return gamma * x_norm + beta

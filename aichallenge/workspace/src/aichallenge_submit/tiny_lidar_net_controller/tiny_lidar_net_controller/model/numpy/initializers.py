@@ -28,3 +28,15 @@ def zeros_init(shape):
         np.ndarray: An array of the specified shape filled with zeros.
     """
     return np.zeros(shape)
+
+
+def ones_init(shape):
+    """Initializes an array with ones.
+
+    Args:
+        shape (tuple): The shape of the output array.
+
+    Returns:
+        np.ndarray: An array of the specified shape filled with ones.
+    """
+    return np.ones(shape)

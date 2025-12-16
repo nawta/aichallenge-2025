@@ -126,3 +126,134 @@ class TinyLidarNetSmall(nn.Module):
         x: Float[Tensor, "batch 2"] = torch.tanh(self.fc3(x))
         
         return x
+
+
+class ResidualBlock1d(nn.Module):
+    """
+    1D Residual Block with skip connection.
+    Helps training deeper networks by mitigating vanishing gradient problem.
+    """
+
+    def __init__(self, channels: int):
+        super().__init__()
+        self.conv1 = nn.Conv1d(channels, channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(channels, channels, kernel_size=3, padding=1)
+
+    def forward(self, x: Tensor) -> Tensor:
+        residual = x
+        x = F.relu(self.conv1(x))
+        x = self.conv2(x)
+        return F.relu(x + residual)
+
+
+class TinyLidarNetDeep(nn.Module):
+    """
+    Deep CNN architecture with Residual connections for 1D LiDAR data processing.
+    
+    Features:
+    - 7 Convolutional layers (vs 5 in standard)
+    - 2 Residual blocks for better gradient flow
+    - 6 Fully connected layers (vs 4 in standard)
+    - Batch Normalization for stable training
+    
+    Assumes default input_dim=1080 for shape annotations.
+    """
+
+    def __init__(self, input_dim: int = 1080, output_dim: int = 2):
+        super().__init__()
+
+        # --- Convolutional Layers (Downsampling) ---
+        # Input: 1080
+        self.conv1 = nn.Conv1d(1, 32, kernel_size=10, stride=4)   # -> 268
+        self.bn1 = nn.BatchNorm1d(32)
+        
+        self.conv2 = nn.Conv1d(32, 48, kernel_size=8, stride=4)   # -> 66
+        self.bn2 = nn.BatchNorm1d(48)
+        
+        self.conv3 = nn.Conv1d(48, 64, kernel_size=4, stride=2)   # -> 32
+        self.bn3 = nn.BatchNorm1d(64)
+        
+        # --- Residual Blocks (preserve spatial dimension) ---
+        self.res_block1 = ResidualBlock1d(64)
+        self.res_block2 = ResidualBlock1d(64)
+        
+        # --- Additional Conv Layers ---
+        self.conv4 = nn.Conv1d(64, 96, kernel_size=3)             # -> 30
+        self.bn4 = nn.BatchNorm1d(96)
+        
+        self.conv5 = nn.Conv1d(96, 96, kernel_size=3)             # -> 28
+        self.bn5 = nn.BatchNorm1d(96)
+        
+        # --- Calculate Flatten Dimension ---
+        with torch.no_grad():
+            dummy = torch.zeros(1, 1, input_dim)
+            x = F.relu(self.bn1(self.conv1(dummy)))
+            x = F.relu(self.bn2(self.conv2(x)))
+            x = F.relu(self.bn3(self.conv3(x)))
+            x = self.res_block1(x)
+            x = self.res_block2(x)
+            x = F.relu(self.bn4(self.conv4(x)))
+            x = F.relu(self.bn5(self.conv5(x)))
+            self.flatten_dim = x.view(1, -1).shape[1]
+
+        # --- Fully Connected Layers (Deeper) ---
+        self.fc1 = nn.Linear(self.flatten_dim, 256)
+        self.fc2 = nn.Linear(256, 128)
+        self.fc3 = nn.Linear(128, 64)
+        self.fc4 = nn.Linear(64, 32)
+        self.fc5 = nn.Linear(32, 10)
+        self.fc6 = nn.Linear(10, output_dim)
+        
+        # Dropout for regularization
+        self.dropout = nn.Dropout(0.2)
+
+        self._initialize_weights()
+
+    def _initialize_weights(self) -> None:
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    def forward(
+        self, 
+        x: Float[Tensor, "batch 1 1080"]
+    ) -> Float[Tensor, "batch 2"]:
+        
+        # Feature Extraction with BatchNorm
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = F.relu(self.bn3(self.conv3(x)))
+        
+        # Residual Blocks
+        x = self.res_block1(x)
+        x = self.res_block2(x)
+        
+        # Additional Conv Layers
+        x = F.relu(self.bn4(self.conv4(x)))
+        x = F.relu(self.bn5(self.conv5(x)))
+
+        # Flatten
+        x = torch.flatten(x, start_dim=1)
+
+        # Deeper Regression Head with Dropout
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        x = self.dropout(x)
+        x = F.relu(self.fc4(x))
+        x = F.relu(self.fc5(x))
+
+        # Output Layer
+        x = torch.tanh(self.fc6(x))
+        
+        return x

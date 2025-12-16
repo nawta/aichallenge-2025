@@ -2,7 +2,7 @@ import logging
 import numpy as np
 from typing import Tuple
 
-from model.tinylidarnet import TinyLidarNetNp, TinyLidarNetSmallNp
+from model.tinylidarnet import TinyLidarNetNp, TinyLidarNetSmallNp, TinyLidarNetDeepNp
 
 
 class TinyLidarNetCore:
@@ -15,7 +15,7 @@ class TinyLidarNetCore:
     Attributes:
         input_dim (int): Dimension of the input vector expected by the model.
         output_dim (int): Dimension of the output vector (acceleration, steering).
-        architecture (str): Model architecture type ('large' or 'small').
+        architecture (str): Model architecture type ('large', 'small', or 'deep').
         acceleration (float): Fixed acceleration value used in 'fixed' control mode.
         control_mode (str): Control strategy ('ai' or 'fixed').
         max_range (float): Maximum LiDAR range used for normalization and clipping.
@@ -40,7 +40,7 @@ class TinyLidarNetCore:
                 Defaults to 1080.
             output_dim (int, optional): The number of output control values.
                 Defaults to 2.
-            architecture (str, optional): The model architecture to use ('large' or 'small').
+            architecture (str, optional): The model architecture to use ('large', 'small', or 'deep').
                 Defaults to 'large'.
             ckpt_path (str, optional): Path to the numpy weight file (.npy or .npz).
                 Defaults to ''.
@@ -56,7 +56,7 @@ class TinyLidarNetCore:
         """
         self.input_dim = input_dim
         self.output_dim = output_dim
-        self.architecture = architecture
+        self.architecture = architecture.lower()
         self.acceleration = acceleration
         self.control_mode = control_mode.lower()
         self.max_range = max_range
@@ -64,6 +64,8 @@ class TinyLidarNetCore:
 
         if self.architecture == 'small':
             self.model = TinyLidarNetSmallNp(input_dim=self.input_dim, output_dim=self.output_dim)
+        elif self.architecture == 'deep':
+            self.model = TinyLidarNetDeepNp(input_dim=self.input_dim, output_dim=self.output_dim)
         else:
             self.model = TinyLidarNetNp(input_dim=self.input_dim, output_dim=self.output_dim)
 

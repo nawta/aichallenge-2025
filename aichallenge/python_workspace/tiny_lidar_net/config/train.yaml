@@ -4,7 +4,7 @@ data:
   val_dir: "/aichallenge/python_workspace/tiny_lidar_net/dataset/val"
 
 model:
-  # "TinyLidarNet" または "TinyLidarNetSmall"
+  # "TinyLidarNet", "TinyLidarNetSmall", または "TinyLidarNetDeep"
   name: "TinyLidarNet"
   # LiDARのスキャン点数
   input_dim: 1080

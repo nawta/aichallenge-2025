@@ -4,7 +4,7 @@ from typing import Dict
 import numpy as np
 import torch
 
-from lib.model import TinyLidarNet, TinyLidarNetSmall
+from lib.model import TinyLidarNet, TinyLidarNetSmall, TinyLidarNetDeep
 
 
 def extract_params_to_dict(model: torch.nn.Module) -> Dict[str, np.ndarray]:
@@ -48,7 +48,7 @@ def load_model(
     """Initializes the model architecture and loads weights from a checkpoint.
 
     Args:
-        model_name: The name of the architecture ('tinylidarnet' or 'tinylidarnet_small').
+        model_name: The name of the architecture ('tinylidarnet', 'tinylidarnet_small', or 'tinylidarnet_deep').
         input_dim: The size of the input dimension (e.g., LiDAR rays).
         output_dim: The size of the output dimension (e.g., control commands).
         ckpt_path: The path to the PyTorch checkpoint file (.pth).
@@ -64,6 +64,8 @@ def load_model(
         model = TinyLidarNet(input_dim=input_dim, output_dim=output_dim)
     elif model_name == "tinylidarnet_small":
         model = TinyLidarNetSmall(input_dim=input_dim, output_dim=output_dim)
+    elif model_name == "tinylidarnet_deep":
+        model = TinyLidarNetDeep(input_dim=input_dim, output_dim=output_dim)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
 
@@ -110,7 +112,7 @@ def main() -> None:
         description="Convert PyTorch weights to NumPy.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument("--model", type=str, choices=["tinylidarnet", "tinylidarnet_small"], default="tinylidarnet", help="Model architecture")
+    parser.add_argument("--model", type=str, choices=["tinylidarnet", "tinylidarnet_small", "tinylidarnet_deep"], default="tinylidarnet", help="Model architecture")
     parser.add_argument("--input-dim", type=int, default=1080, help="Input dimension size")
     parser.add_argument("--output-dim", type=int, default=2, help="Output dimension size")
     parser.add_argument("--ckpt", type=Path, required=True, help="Source .pth checkpoint")

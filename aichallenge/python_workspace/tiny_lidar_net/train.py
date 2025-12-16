@@ -8,7 +8,7 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 
-from lib.model import TinyLidarNet, TinyLidarNetSmall
+from lib.model import TinyLidarNet, TinyLidarNetSmall, TinyLidarNetDeep
 from lib.data import MultiSeqConcatDataset
 from lib.loss import WeightedSmoothL1Loss
 
@@ -55,6 +55,11 @@ def main(cfg: DictConfig):
     # === Model ===
     if cfg.model.name == "TinyLidarNetSmall":
         model = TinyLidarNetSmall(
+            input_dim=cfg.model.input_dim,
+            output_dim=cfg.model.output_dim
+        ).to(device)
+    elif cfg.model.name == "TinyLidarNetDeep":
+        model = TinyLidarNetDeep(
             input_dim=cfg.model.input_dim,
             output_dim=cfg.model.output_dim
         ).to(device)
