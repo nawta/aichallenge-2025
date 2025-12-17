@@ -5,13 +5,15 @@
 # Tests all model architectures with 1 epoch to verify they work correctly.
 #
 # Usage:
-#   ./test_all_models.sh
+#   ./tests/test_all_tiny_lidar_models.sh  (from repo root)
 # =============================================================================
 
 set -e  # Exit on error
 
+# Navigate to tiny_lidar_net directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "${SCRIPT_DIR}"
+TINY_LIDAR_DIR="${SCRIPT_DIR}/../aichallenge/python_workspace/tiny_lidar_net"
+cd "${TINY_LIDAR_DIR}"
 
 # Test parameters
 TEST_EPOCHS=1

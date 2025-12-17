@@ -967,6 +967,21 @@ python3 train.py \
 | `2408bf5` | fix(tiny_lidar_net): separate Hydra/CLI args and add TinyLidarNetMap training |
 | `f6a821e` | feat(tiny_lidar_net): add BEV model support for training |
 | `27c632d` | docs: add development log for 2025/12/17 |
+| `2fe17c4` | test(tiny_lidar_net): add quick test script for all models |
+
+### クイックテストスクリプト
+
+全モデルの動作確認用スクリプト `test_all_models.sh` を作成:
+
+```bash
+# Dockerコンテナ内で実行
+cd /aichallenge/python_workspace/tiny_lidar_net
+./test_all_models.sh
+```
+
+- 1エポック、小バッチサイズでテスト
+- 全11モデル（Single-frame 4 + Temporal 3 + Map 1 + BEV 3）をテスト
+- 成功/失敗のサマリーを表示
 
 ---
 
