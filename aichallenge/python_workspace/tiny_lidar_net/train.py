@@ -244,26 +244,26 @@ def main(cfg: DictConfig):
     elif model_name == "TinyLidarNetLocalBEV":
         model = TinyLidarNetLocalBEV(
             input_dim=cfg.model.input_dim,
-            local_grid_size=cfg.model.get("local_grid_size", 64),
-            local_channels=2,
+            local_bev_size=cfg.model.local_bev_size,
+            local_bev_channels=cfg.model.local_bev_channels,
             state_dim=state_dim,
             output_dim=cfg.model.output_dim
         ).to(device)
     elif model_name == "TinyLidarNetGlobalBEV":
         model = TinyLidarNetGlobalBEV(
             input_dim=cfg.model.input_dim,
-            global_grid_size=cfg.model.get("global_grid_size", 128),
-            global_channels=3,
+            global_bev_size=cfg.model.global_bev_size,
+            global_bev_channels=cfg.model.global_bev_channels,
             state_dim=state_dim,
             output_dim=cfg.model.output_dim
         ).to(device)
     elif model_name == "TinyLidarNetDualBEV":
         model = TinyLidarNetDualBEV(
             input_dim=cfg.model.input_dim,
-            local_grid_size=cfg.model.get("local_grid_size", 64),
-            local_channels=2,
-            global_grid_size=cfg.model.get("global_grid_size", 128),
-            global_channels=3,
+            local_bev_size=cfg.model.local_bev_size,
+            local_bev_channels=cfg.model.local_bev_channels,
+            global_bev_size=cfg.model.global_bev_size,
+            global_bev_channels=cfg.model.global_bev_channels,
             state_dim=state_dim,
             output_dim=cfg.model.output_dim
         ).to(device)
