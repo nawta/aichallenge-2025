@@ -219,3 +219,84 @@ def batch_norm1d(x, weight, bias, running_mean, running_var, eps=1e-5):
     
     x_norm = (x - mean) / np.sqrt(var + eps)
     return gamma * x_norm + beta
+
+
+def batch_norm2d(x, weight, bias, running_mean, running_var, eps=1e-5):
+    """Applies Batch Normalization over a 2D input (mini-batch of 2D inputs with channels).
+
+    Uses running statistics for inference mode (eval mode).
+
+    Args:
+        x (np.ndarray): Input array of shape (batch_size, channels, height, width).
+        weight (np.ndarray): Learnable scale parameter (gamma) of shape (channels,).
+        bias (np.ndarray): Learnable shift parameter (beta) of shape (channels,).
+        running_mean (np.ndarray): Running mean of shape (channels,).
+        running_var (np.ndarray): Running variance of shape (channels,).
+        eps (float): Small constant for numerical stability. Defaults to 1e-5.
+
+    Returns:
+        np.ndarray: Normalized output of the same shape as input.
+    """
+    # Reshape parameters for broadcasting: (1, C, 1, 1)
+    mean = running_mean.reshape(1, -1, 1, 1)
+    var = running_var.reshape(1, -1, 1, 1)
+    gamma = weight.reshape(1, -1, 1, 1)
+    beta = bias.reshape(1, -1, 1, 1)
+    
+    x_norm = (x - mean) / np.sqrt(var + eps)
+    return gamma * x_norm + beta
+
+
+def conv2d_padded(x, weight, bias, stride=(1, 1), padding=(0, 0)):
+    """Applies a 2D convolution with optional padding.
+
+    Args:
+        x (np.ndarray): Input array of shape (batch_size, in_channels, height, width).
+        weight (np.ndarray): Filters of shape
+            (out_channels, in_channels, kernel_height, kernel_width).
+        bias (np.ndarray): Bias vector of shape (out_channels,).
+        stride (tuple): A tuple of (stride_height, stride_width). Defaults to (1, 1).
+        padding (tuple): Zero-padding added (pad_height, pad_width). Defaults to (0, 0).
+
+    Returns:
+        np.ndarray: The output of the convolution.
+    """
+    p_h, p_w = padding
+    if p_h > 0 or p_w > 0:
+        x = np.pad(x, ((0, 0), (0, 0), (p_h, p_h), (p_w, p_w)), mode='constant', constant_values=0)
+    return conv2d(x, weight, bias, stride)
+
+
+def adaptive_avg_pool2d(x, output_size=(1, 1)):
+    """Applies 2D adaptive average pooling over an input signal.
+
+    The output size is fixed regardless of input size.
+
+    Args:
+        x (np.ndarray): Input array of shape (batch_size, channels, height, width).
+        output_size (tuple): The target output size (height, width). Defaults to (1, 1).
+
+    Returns:
+        np.ndarray: The pooled output array of shape (batch_size, channels, out_h, out_w).
+    """
+    n_x, c, h_in, w_in = x.shape
+    out_h, out_w = output_size
+    
+    # For global average pooling (1, 1), simply take mean over spatial dims
+    if out_h == 1 and out_w == 1:
+        return x.mean(axis=(2, 3), keepdims=True)
+    
+    # General adaptive pooling
+    result = np.zeros((n_x, c, out_h, out_w), dtype=x.dtype)
+    
+    for i in range(out_h):
+        for j in range(out_w):
+            # Calculate input region for this output cell
+            h_start = int(np.floor(i * h_in / out_h))
+            h_end = int(np.ceil((i + 1) * h_in / out_h))
+            w_start = int(np.floor(j * w_in / out_w))
+            w_end = int(np.ceil((j + 1) * w_in / out_w))
+            
+            result[:, :, i, j] = x[:, :, h_start:h_end, w_start:w_end].mean(axis=(2, 3))
+    
+    return result

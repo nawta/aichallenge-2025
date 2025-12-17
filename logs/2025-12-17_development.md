@@ -721,6 +721,109 @@ python3 osm2csv.py \
 
 ---
 
+## 🗺️ TinyLidarNetMap - 静的マップ画像統合
+
+### 背景
+`map_image/2.png`（トラック境界線・走行経路付き処理済み画像）を2D CNNエンコーダーで特徴抽出し、LiDARブランチとLate Fusionで統合する新モデル`TinyLidarNetMap`を実装。
+
+BEVモデル（`local_bev`, `global_bev`, `dual_bev`）はリアルタイムでBEVを生成するのに対し、このモデルは**静的なマップ画像を起動時に1回だけエンコードしてキャッシュ**することで、推論時のオーバーヘッドを最小化。
+
+### アーキテクチャ
+
+```
+入力:
+  - LiDAR: (batch, 1, 1080)
+  - Map Image: (1, 3, 224, 224)  ← 起動時に1回だけエンコード
+
+[LiDAR Branch]
+  Conv1D(1→24→36→48→64→64) → Flatten → 1792
+
+[Map Branch - MapEncoder]
+  Conv2D(3→32, k=7, s=2, p=3) + BN + ReLU → MaxPool(2×2)  → 56×56
+  Conv2D(32→64, k=5, s=2, p=2) + BN + ReLU → MaxPool(2×2) → 14×14
+  Conv2D(64→128, k=3, s=1, p=1) + BN + ReLU → MaxPool(2×2) → 7×7
+  Conv2D(128→128, k=3, s=1, p=1) + BN + ReLU
+  → Global Average Pool → FC(128→128) → ReLU
+  → 128-dim features (cached)
+
+[Late Fusion]
+  Concat(1792 + 128 = 1920) → FC Head → Output (2)
+```
+
+### 変更ファイル一覧
+
+| ファイル | 変更内容 |
+|----------|----------|
+| `lib/model.py` | `MapEncoder`, `TinyLidarNetMap` クラス追加 |
+| `train.py` | `TinyLidarNetMap` 対応、`load_map_image()` 追加 |
+| `convert_weight.py` | `tinylidarnet_map` オプション追加 |
+| `model/numpy/layers.py` | `batch_norm2d`, `conv2d_padded`, `adaptive_avg_pool2d` 追加 |
+| `model/__init__.py` | 新関数のエクスポート追加 |
+| `model/tinylidarnet.py` | `MapEncoderImage`, `TinyLidarNetMapImage`, `TinyLidarNetMapImageNp` 追加 |
+| `tiny_lidar_net_controller_core.py` | `map_image` アーキテクチャ対応 |
+| `tiny_lidar_net_controller_node.py` | `map.image_path`, `map.feature_dim` パラメータ追加 |
+
+### 使用方法
+
+#### 学習
+```yaml
+# config/train.yaml
+model:
+  name: TinyLidarNetMap
+  map_image_path: "../../map_image/2.png"
+  map_feature_dim: 128
+```
+
+```bash
+python train.py model.name='TinyLidarNetMap' model.map_image_path='../../map_image/2.png'
+```
+
+#### 重み変換
+```bash
+python convert_weight.py \
+  --model tinylidarnet_map \
+  --map-feature-dim 128 \
+  --ckpt ./checkpoints/best_model.pth \
+  --output ./weights/tinylidarnet_map.npy
+```
+
+#### 推論設定
+```yaml
+# tiny_lidar_net_node.param.yaml
+model:
+  architecture: "map_image"
+  ckpt_path: "/path/to/tinylidarnet_map.npy"
+
+map:
+  image_path: "/path/to/map_image/2.png"
+  feature_dim: 128
+```
+
+### 設計ポイント
+
+1. **静的キャッシュ**: マップは変化しないため、起動時に1回だけエンコードしてキャッシュ。推論時は毎回同じ特徴量を再利用。
+2. **Late Fusion**: LiDAR特徴量（1792次元）とマップ特徴量（128次元）を連結してFC層に入力。
+3. **標準サイズ**: 224×224にリサイズ（CNN設計の標準サイズ、計算効率）
+4. **BatchNorm**: 2D BatchNormを使用して学習の安定化
+
+### BEVモデルとの比較
+
+| 項目 | TinyLidarNetMap | BEV Models |
+|------|-----------------|------------|
+| マップ表現 | RGB画像 (224×224) | BEVグリッド (64×64/128×128) |
+| 更新頻度 | 起動時1回 | 毎フレーム |
+| 座標系 | なし（画像全体） | 車両中心/マップ固定 |
+| 計算コスト | 低（キャッシュ） | 中〜高 |
+| 自車位置反映 | なし | あり |
+
+### 期待される効果
+
+1. **グローバルコンテキスト**: トラック全体の形状を把握
+2. **軽量推論**: マップ特徴量は事前計算済みでメモリから読み出すだけ
+3. **シンプルな実装**: リアルタイム座標変換が不要
+
+---
+
 ## 📚 参考
 
 - [TinyLidarNet Paper (arXiv:2410.07447)](https://arxiv.org/abs/2410.07447)

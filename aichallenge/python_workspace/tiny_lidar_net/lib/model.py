@@ -803,3 +803,242 @@ class TinyLidarNetTCN(nn.Module):
         # Output head
         out = F.relu(self.fc1(out))
         return torch.tanh(self.fc2(out))
+
+
+# =============================================================================
+# Map-Integrated Models
+# =============================================================================
+
+class MapEncoder(nn.Module):
+    """
+    2D CNN encoder for map image feature extraction.
+    
+    Processes a static map image (e.g., track boundaries) and outputs
+    a fixed-size feature vector. The map features are computed once at
+    initialization and cached for efficient inference.
+    
+    Architecture:
+    - 4 Conv2D layers with MaxPooling: 3→32→64→128→128 channels
+    - Global Average Pooling
+    - FC layer to output_dim
+    
+    Args:
+        input_channels: Number of input image channels (default: 3 for RGB)
+        output_dim: Output feature dimension (default: 128)
+    """
+    
+    def __init__(self, input_channels: int = 3, output_dim: int = 128):
+        super().__init__()
+        
+        self.output_dim = output_dim
+        
+        # Conv2D layers with BatchNorm
+        # Input: (B, 3, 224, 224)
+        self.conv1 = nn.Conv2d(input_channels, 32, kernel_size=7, stride=2, padding=3)  # -> 112x112
+        self.bn1 = nn.BatchNorm2d(32)
+        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)  # -> 56x56
+        
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=5, stride=2, padding=2)  # -> 28x28
+        self.bn2 = nn.BatchNorm2d(64)
+        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)  # -> 14x14
+        
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1)  # -> 14x14
+        self.bn3 = nn.BatchNorm2d(128)
+        self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)  # -> 7x7
+        
+        self.conv4 = nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1)  # -> 7x7
+        self.bn4 = nn.BatchNorm2d(128)
+        
+        # Global Average Pooling
+        self.gap = nn.AdaptiveAvgPool2d(1)  # -> 1x1
+        
+        # Final FC layer
+        self.fc = nn.Linear(128, output_dim)
+        
+        self._initialize_weights()
+    
+    def _initialize_weights(self) -> None:
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+    
+    def forward(self, x: Float[Tensor, "batch 3 224 224"]) -> Float[Tensor, "batch 128"]:
+        """
+        Forward pass for map image encoding.
+        
+        Args:
+            x: Map image tensor, shape (batch, channels, height, width)
+               Expects normalized RGB image (values in [0, 1])
+        
+        Returns:
+            Map feature vector, shape (batch, output_dim)
+        """
+        # Conv block 1
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = self.pool1(x)
+        
+        # Conv block 2
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = self.pool2(x)
+        
+        # Conv block 3
+        x = F.relu(self.bn3(self.conv3(x)))
+        x = self.pool3(x)
+        
+        # Conv block 4
+        x = F.relu(self.bn4(self.conv4(x)))
+        
+        # Global Average Pooling
+        x = self.gap(x)
+        x = torch.flatten(x, start_dim=1)  # (batch, 128)
+        
+        # Final projection
+        x = F.relu(self.fc(x))
+        
+        return x
+
+
+class TinyLidarNetMap(nn.Module):
+    """
+    Multi-modal CNN architecture that fuses LiDAR data with static map features.
+    
+    Uses Late Fusion approach:
+    - LiDAR branch: Same as TinyLidarNet (5 Conv layers)
+    - Map branch: 2D CNN encoder (MapEncoder) for static map image
+    - Fusion: Concatenate features and pass through FC layers
+    
+    The map features are computed once from the map image and cached internally.
+    During training/inference, only LiDAR data needs to be provided per sample.
+    
+    Args:
+        input_dim: LiDAR scan dimension (default: 1080)
+        map_feature_dim: Map encoder output dimension (default: 128)
+        output_dim: Output dimension (default: 2)
+    """
+    
+    def __init__(
+        self,
+        input_dim: int = 1080,
+        map_feature_dim: int = 128,
+        output_dim: int = 2
+    ):
+        super().__init__()
+        
+        self.map_feature_dim = map_feature_dim
+        
+        # --- LiDAR Branch (same as TinyLidarNet) ---
+        self.conv1 = nn.Conv1d(1, 24, kernel_size=10, stride=4)  # -> 268
+        self.conv2 = nn.Conv1d(24, 36, kernel_size=8, stride=4)  # -> 66
+        self.conv3 = nn.Conv1d(36, 48, kernel_size=4, stride=2)  # -> 32
+        self.conv4 = nn.Conv1d(48, 64, kernel_size=3)            # -> 30
+        self.conv5 = nn.Conv1d(64, 64, kernel_size=3)            # -> 28
+        
+        # Calculate LiDAR flatten dimension
+        with torch.no_grad():
+            dummy = torch.zeros(1, 1, input_dim)
+            out = self.conv5(self.conv4(self.conv3(self.conv2(self.conv1(dummy)))))
+            self.lidar_flatten_dim = out.view(1, -1).shape[1]  # 1792
+        
+        # --- Map Branch ---
+        self.map_encoder = MapEncoder(input_channels=3, output_dim=map_feature_dim)
+        
+        # Cached map features (computed once, reused for all samples)
+        self.register_buffer('cached_map_features', None)
+        
+        # --- Fusion Head ---
+        # Concat: lidar_features (1792) + map_features (128) = 1920
+        fusion_dim = self.lidar_flatten_dim + map_feature_dim
+        
+        self.fc1 = nn.Linear(fusion_dim, 100)
+        self.fc2 = nn.Linear(100, 50)
+        self.fc3 = nn.Linear(50, 10)
+        self.fc4 = nn.Linear(10, output_dim)
+        
+        self._initialize_weights()
+    
+    def _initialize_weights(self) -> None:
+        for m in self.modules():
+            if isinstance(m, (nn.Conv1d, nn.Linear)):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+    
+    def set_map_image(self, map_image: Float[Tensor, "1 3 224 224"]) -> None:
+        """
+        Precompute and cache map features from the map image.
+        
+        This should be called once at initialization with the static map image.
+        The features are cached and reused for all subsequent forward passes.
+        
+        Args:
+            map_image: Map image tensor, shape (1, 3, 224, 224)
+                       Expects normalized RGB image (values in [0, 1])
+        """
+        self.map_encoder.eval()
+        with torch.no_grad():
+            map_features = self.map_encoder(map_image)  # (1, map_feature_dim)
+            self.cached_map_features = map_features
+    
+    def forward(
+        self,
+        lidar: Float[Tensor, "batch 1 1080"],
+        map_image: Float[Tensor, "batch 3 224 224"] = None
+    ) -> Float[Tensor, "batch 2"]:
+        """
+        Forward pass with LiDAR data and optional map image.
+        
+        Args:
+            lidar: Normalized LiDAR scan data, shape (batch, 1, input_dim)
+            map_image: Optional map image. If None, uses cached features.
+                       If provided, encodes the map (useful for training).
+        
+        Returns:
+            Control output [acceleration, steering], shape (batch, output_dim)
+        """
+        batch_size = lidar.size(0)
+        
+        # --- LiDAR Branch ---
+        x = F.relu(self.conv1(lidar))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+        x = F.relu(self.conv4(x))
+        x = F.relu(self.conv5(x))
+        
+        # Flatten LiDAR features: (Batch, 64, 28) -> (Batch, 1792)
+        lidar_features = torch.flatten(x, start_dim=1)
+        
+        # --- Map Branch ---
+        if map_image is not None:
+            # Encode provided map image (training mode or explicit input)
+            map_features = self.map_encoder(map_image)  # (batch, map_feature_dim)
+        elif self.cached_map_features is not None:
+            # Use cached features (inference mode)
+            # Expand cached features to match batch size
+            map_features = self.cached_map_features.expand(batch_size, -1)
+        else:
+            raise ValueError(
+                "No map image provided and no cached features available. "
+                "Call set_map_image() first or provide map_image argument."
+            )
+        
+        # --- Late Fusion ---
+        fused = torch.cat([lidar_features, map_features], dim=1)  # (Batch, 1920)
+        
+        # --- Regression Head ---
+        x = F.relu(self.fc1(fused))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        
+        # Output Layer
+        x = torch.tanh(self.fc4(x))
+        
+        return x

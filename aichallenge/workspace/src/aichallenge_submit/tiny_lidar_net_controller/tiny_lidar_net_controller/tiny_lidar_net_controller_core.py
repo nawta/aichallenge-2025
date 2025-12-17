@@ -5,7 +5,8 @@ from typing import Optional, Tuple, Union
 from model.tinylidarnet import (
     TinyLidarNetNp, TinyLidarNetSmallNp, TinyLidarNetDeepNp, TinyLidarNetFusionNp,
     TinyLidarNetStackedNp, TinyLidarNetBiLSTMNp, TinyLidarNetTCNNp,
-    TinyLidarNetLocalBEVNp, TinyLidarNetGlobalBEVNp, TinyLidarNetDualBEVNp
+    TinyLidarNetLocalBEVNp, TinyLidarNetGlobalBEVNp, TinyLidarNetDualBEVNp,
+    TinyLidarNetMapImageNp
 )
 
 
@@ -22,6 +23,9 @@ TEMPORAL_ARCHITECTURES = ['stacked', 'bilstm', 'tcn']
 
 # BEV-enabled model architectures
 BEV_ARCHITECTURES = ['local_bev', 'global_bev', 'dual_bev']
+
+# Map-enabled model architectures
+MAP_ARCHITECTURES = ['map_image']
 
 
 class TinyLidarNetCore:
@@ -68,7 +72,9 @@ class TinyLidarNetCore:
         local_bev_size: int = 64,
         local_bev_channels: int = 2,
         global_bev_size: int = 128,
-        global_bev_channels: int = 3
+        global_bev_channels: int = 3,
+        map_feature_dim: int = 128,
+        map_image_path: str = ''
     ):
         """Initializes the TinyLidarNetCore with specified parameters.
 
@@ -85,7 +91,7 @@ class TinyLidarNetCore:
                 Defaults to 128.
             architecture (str, optional): The model architecture to use.
                 Options: 'large', 'small', 'deep', 'fusion', 'stacked', 'bilstm', 'tcn',
-                         'local_bev', 'global_bev', 'dual_bev'.
+                         'local_bev', 'global_bev', 'dual_bev', 'map_image'.
                 Defaults to 'large'.
             ckpt_path (str, optional): Path to the numpy weight file (.npy or .npz).
                 Defaults to ''.
@@ -102,6 +108,8 @@ class TinyLidarNetCore:
             local_bev_channels (int, optional): Number of local BEV channels. Defaults to 2.
             global_bev_size (int, optional): Size of global BEV grid. Defaults to 128.
             global_bev_channels (int, optional): Number of global BEV channels. Defaults to 3.
+            map_feature_dim (int, optional): Map feature dimension for map_image architecture. Defaults to 128.
+            map_image_path (str, optional): Path to the map image file. Defaults to ''.
         """
         self.input_dim = input_dim
         self.output_dim = output_dim
@@ -116,10 +124,13 @@ class TinyLidarNetCore:
         self.local_bev_channels = local_bev_channels
         self.global_bev_size = global_bev_size
         self.global_bev_channels = global_bev_channels
+        self.map_feature_dim = map_feature_dim
+        self.map_image_path = map_image_path
         
         self.use_fusion = self.architecture == 'fusion'
         self.is_temporal = self.architecture in TEMPORAL_ARCHITECTURES
         self.is_bev = self.architecture in BEV_ARCHITECTURES
+        self.is_map = self.architecture in MAP_ARCHITECTURES
         self.logger = logging.getLogger(__name__)
 
         # Initialize model based on architecture
@@ -180,6 +191,12 @@ class TinyLidarNetCore:
                 global_bev_channels=self.global_bev_channels,
                 output_dim=self.output_dim
             )
+        elif self.architecture == 'map_image':
+            self.model = TinyLidarNetMapImageNp(
+                input_dim=self.input_dim,
+                map_feature_dim=self.map_feature_dim,
+                output_dim=self.output_dim
+            )
         else:
             self.model = TinyLidarNetNp(input_dim=self.input_dim, output_dim=self.output_dim)
 
@@ -187,6 +204,38 @@ class TinyLidarNetCore:
             self._load_weights(ckpt_path)
         else:
             self.logger.warning("No weight file provided. Using randomly initialized weights.")
+        
+        # Load and cache map image for map_image architecture
+        if self.is_map and self.map_image_path:
+            self._load_and_cache_map_image(self.map_image_path)
+
+    def _load_and_cache_map_image(self, map_path: str) -> None:
+        """Loads map image and caches the features for map_image architecture.
+        
+        Args:
+            map_path: Path to the map image file (PNG or JPG).
+        """
+        try:
+            from PIL import Image
+            
+            # Load and preprocess image
+            img = Image.open(map_path).convert('RGB')
+            img = img.resize((224, 224), Image.Resampling.LANCZOS)
+            
+            # Convert to numpy array and normalize to [0, 1]
+            img_array = np.array(img, dtype=np.float32) / 255.0
+            
+            # Transpose to (C, H, W) and add batch dimension: (1, 3, 224, 224)
+            img_tensor = np.transpose(img_array, (2, 0, 1))
+            img_tensor = np.expand_dims(img_tensor, axis=0)
+            
+            # Cache the map features
+            self.model.set_map_image(img_tensor)
+            self.logger.info(f"Map image loaded and cached from: {map_path}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to load map image from {map_path}: {e}")
+            raise e
 
     def process(
         self, 
@@ -197,6 +246,7 @@ class TinyLidarNetCore:
 
         This method handles data cleaning (NaN/Inf removal), resizing, normalization,
         and model inference. For fusion models, also processes kinematic state.
+        For map_image models, uses cached map features.
 
         Args:
             ranges (np.ndarray): A 1D numpy array containing raw LiDAR range data.
@@ -224,6 +274,9 @@ class TinyLidarNetCore:
             state = np.expand_dims(processed_odom, axis=0)
             
             outputs = self.model(x, state)[0]
+        elif self.is_map:
+            # Map model uses cached map features
+            outputs = self.model(x)[0]
         else:
             outputs = self.model(x)[0]
 

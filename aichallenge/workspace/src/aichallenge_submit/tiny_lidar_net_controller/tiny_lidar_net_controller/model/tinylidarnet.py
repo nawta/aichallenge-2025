@@ -6,11 +6,16 @@ import torch.nn.functional as F
 from . import (
     conv1d,
     conv1d_padded,
+    conv2d,
+    conv2d_padded,
+    max_pool2d,
     linear,
     relu,
     tanh,
     flatten,
     batch_norm1d,
+    batch_norm2d,
+    adaptive_avg_pool2d,
     kaiming_normal_init,
     zeros_init,
     ones_init,
@@ -1241,6 +1246,360 @@ class TinyLidarNetTCNNp:
         # Output head
         out = relu(linear(out, self.params['fc1_weight'], self.params['fc1_bias']))
         return tanh(linear(out, self.params['fc2_weight'], self.params['fc2_bias']))
+
+
+# =============================================================================
+# Map-Enhanced Models (Image-Based Static Map)
+# =============================================================================
+
+class MapEncoderImage(nn.Module):
+    """2D CNN encoder for static map image feature extraction.
+    
+    Processes a static map image (e.g., track boundaries) and outputs
+    a fixed-size feature vector. Used by TinyLidarNetMapImage.
+    
+    Architecture:
+    - 4 Conv2D layers with MaxPooling and BatchNorm
+    - Global Average Pooling
+    - FC layer to output_dim
+    """
+    
+    def __init__(self, input_channels: int = 3, output_dim: int = 128):
+        super().__init__()
+        
+        self.output_dim = output_dim
+        
+        # Input: (B, 3, 224, 224)
+        self.conv1 = nn.Conv2d(input_channels, 32, kernel_size=7, stride=2, padding=3)  # -> 112x112
+        self.bn1 = nn.BatchNorm2d(32)
+        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)  # -> 56x56
+        
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=5, stride=2, padding=2)  # -> 28x28
+        self.bn2 = nn.BatchNorm2d(64)
+        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)  # -> 14x14
+        
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1)  # -> 14x14
+        self.bn3 = nn.BatchNorm2d(128)
+        self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)  # -> 7x7
+        
+        self.conv4 = nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1)  # -> 7x7
+        self.bn4 = nn.BatchNorm2d(128)
+        
+        self.gap = nn.AdaptiveAvgPool2d(1)  # -> 1x1
+        self.fc = nn.Linear(128, output_dim)
+        
+        self._initialize_weights()
+    
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+    
+    def forward(self, x):
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = self.pool1(x)
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = self.pool2(x)
+        x = F.relu(self.bn3(self.conv3(x)))
+        x = self.pool3(x)
+        x = F.relu(self.bn4(self.conv4(x)))
+        x = self.gap(x)
+        x = x.view(x.size(0), -1)
+        x = F.relu(self.fc(x))
+        return x
+
+
+class TinyLidarNetMapImage(nn.Module):
+    """Multi-modal CNN fusing LiDAR with static map image features.
+    
+    Uses Late Fusion approach:
+    - LiDAR branch: Same as TinyLidarNet (5 Conv layers)
+    - Map branch: 2D CNN encoder (MapEncoderImage) for static map image
+    - Fusion: Concatenate features and pass through FC layers
+    
+    The map features are computed once and cached for efficient inference.
+    """
+    
+    def __init__(
+        self,
+        input_dim: int = 1080,
+        map_feature_dim: int = 128,
+        output_dim: int = 2
+    ):
+        super().__init__()
+        
+        self.map_feature_dim = map_feature_dim
+        
+        # --- LiDAR Branch (same as TinyLidarNet) ---
+        self.conv1 = nn.Conv1d(1, 24, kernel_size=10, stride=4)
+        self.conv2 = nn.Conv1d(24, 36, kernel_size=8, stride=4)
+        self.conv3 = nn.Conv1d(36, 48, kernel_size=4, stride=2)
+        self.conv4 = nn.Conv1d(48, 64, kernel_size=3)
+        self.conv5 = nn.Conv1d(64, 64, kernel_size=3)
+        
+        with torch.no_grad():
+            dummy = torch.zeros(1, 1, input_dim)
+            out = self.conv5(self.conv4(self.conv3(self.conv2(self.conv1(dummy)))))
+            self.lidar_flatten_dim = out.view(1, -1).shape[1]
+        
+        # --- Map Branch ---
+        self.map_encoder = MapEncoderImage(input_channels=3, output_dim=map_feature_dim)
+        
+        # Cached map features
+        self.register_buffer('cached_map_features', None)
+        
+        # --- Fusion Head ---
+        fusion_dim = self.lidar_flatten_dim + map_feature_dim
+        
+        self.fc1 = nn.Linear(fusion_dim, 100)
+        self.fc2 = nn.Linear(100, 50)
+        self.fc3 = nn.Linear(50, 10)
+        self.fc4 = nn.Linear(10, output_dim)
+        
+        self._initialize_weights()
+    
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, (nn.Conv1d, nn.Linear)):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+    
+    def set_map_image(self, map_image):
+        """Precompute and cache map features."""
+        self.map_encoder.eval()
+        with torch.no_grad():
+            self.cached_map_features = self.map_encoder(map_image)
+    
+    def forward(self, lidar, map_image=None):
+        batch_size = lidar.size(0)
+        
+        # LiDAR branch
+        x = F.relu(self.conv1(lidar))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+        x = F.relu(self.conv4(x))
+        x = F.relu(self.conv5(x))
+        lidar_features = x.view(x.size(0), -1)
+        
+        # Map branch
+        if map_image is not None:
+            map_features = self.map_encoder(map_image)
+        elif self.cached_map_features is not None:
+            map_features = self.cached_map_features.expand(batch_size, -1)
+        else:
+            raise ValueError("No map image provided and no cached features available.")
+        
+        # Late fusion
+        fused = torch.cat([lidar_features, map_features], dim=1)
+        
+        # Regression head
+        x = F.relu(self.fc1(fused))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        return torch.tanh(self.fc4(x))
+
+
+class TinyLidarNetMapImageNp:
+    """NumPy implementation of TinyLidarNetMapImage.
+    
+    Fuses LiDAR data with static map image features using pure NumPy inference.
+    """
+    
+    def __init__(
+        self,
+        input_dim: int = 1080,
+        map_feature_dim: int = 128,
+        output_dim: int = 2
+    ):
+        self.input_dim = input_dim
+        self.map_feature_dim = map_feature_dim
+        self.output_dim = output_dim
+        self.params = {}
+        
+        # Cached map features
+        self.cached_map_features = None
+        
+        # LiDAR conv strides
+        self.lidar_strides = {'conv1': 4, 'conv2': 4, 'conv3': 2, 'conv4': 1, 'conv5': 1}
+        
+        # LiDAR branch shapes
+        self.shapes = {
+            'conv1_weight': (24, 1, 10),  'conv1_bias': (24,),
+            'conv2_weight': (36, 24, 8),  'conv2_bias': (36,),
+            'conv3_weight': (48, 36, 4),  'conv3_bias': (48,),
+            'conv4_weight': (64, 48, 3),  'conv4_bias': (64,),
+            'conv5_weight': (64, 64, 3),  'conv5_bias': (64,),
+        }
+        
+        # Map encoder shapes (with BatchNorm)
+        self.shapes.update({
+            'map_encoder_conv1_weight': (32, 3, 7, 7), 'map_encoder_conv1_bias': (32,),
+            'map_encoder_bn1_weight': (32,), 'map_encoder_bn1_bias': (32,),
+            'map_encoder_bn1_running_mean': (32,), 'map_encoder_bn1_running_var': (32,),
+            
+            'map_encoder_conv2_weight': (64, 32, 5, 5), 'map_encoder_conv2_bias': (64,),
+            'map_encoder_bn2_weight': (64,), 'map_encoder_bn2_bias': (64,),
+            'map_encoder_bn2_running_mean': (64,), 'map_encoder_bn2_running_var': (64,),
+            
+            'map_encoder_conv3_weight': (128, 64, 3, 3), 'map_encoder_conv3_bias': (128,),
+            'map_encoder_bn3_weight': (128,), 'map_encoder_bn3_bias': (128,),
+            'map_encoder_bn3_running_mean': (128,), 'map_encoder_bn3_running_var': (128,),
+            
+            'map_encoder_conv4_weight': (128, 128, 3, 3), 'map_encoder_conv4_bias': (128,),
+            'map_encoder_bn4_weight': (128,), 'map_encoder_bn4_bias': (128,),
+            'map_encoder_bn4_running_mean': (128,), 'map_encoder_bn4_running_var': (128,),
+            
+            'map_encoder_fc_weight': (map_feature_dim, 128), 'map_encoder_fc_bias': (map_feature_dim,),
+        })
+        
+        # Fusion head shapes
+        lidar_flatten_dim = self._get_lidar_output_dim()
+        fusion_dim = lidar_flatten_dim + map_feature_dim
+        
+        self.shapes.update({
+            'fc1_weight': (100, fusion_dim), 'fc1_bias': (100,),
+            'fc2_weight': (50, 100),         'fc2_bias': (50,),
+            'fc3_weight': (10, 50),          'fc3_bias': (10,),
+            'fc4_weight': (output_dim, 10),  'fc4_bias': (output_dim,),
+        })
+        
+        self._initialize_weights()
+    
+    def _get_lidar_output_dim(self) -> int:
+        l = self.input_dim
+        kernels = [10, 8, 4, 3, 3]
+        strides = [4, 4, 2, 1, 1]
+        for k, s in zip(kernels, strides):
+            l = (l - k) // s + 1
+        return 64 * l
+    
+    def _initialize_weights(self):
+        for name, shape in self.shapes.items():
+            if name.endswith('_weight') and 'bn' not in name:
+                if 'conv' in name:
+                    if len(shape) == 4:
+                        fan_out = shape[0] * shape[2] * shape[3]
+                    else:
+                        fan_out = shape[0] * shape[2]
+                else:
+                    fan_out = shape[0]
+                self.params[name] = kaiming_normal_init(shape, fan_out)
+            elif name.endswith('_bias') and 'bn' not in name:
+                self.params[name] = zeros_init(shape)
+            elif 'bn' in name and name.endswith('_weight'):
+                self.params[name] = ones_init(shape)
+            elif 'bn' in name and name.endswith('_bias'):
+                self.params[name] = zeros_init(shape)
+            elif 'running_mean' in name:
+                self.params[name] = zeros_init(shape)
+            elif 'running_var' in name:
+                self.params[name] = ones_init(shape)
+    
+    def encode_map(self, map_image):
+        """Encode map image to feature vector.
+        
+        Args:
+            map_image: Input array of shape (1, 3, 224, 224).
+        
+        Returns:
+            Map features of shape (1, map_feature_dim).
+        """
+        import numpy as np
+        
+        # Conv1 + BN1 + ReLU + Pool1 (stride=2, pool=2 -> /4)
+        x = conv2d_padded(map_image, self.params['map_encoder_conv1_weight'],
+                          self.params['map_encoder_conv1_bias'], stride=(2, 2), padding=(3, 3))
+        x = batch_norm2d(x, self.params['map_encoder_bn1_weight'], self.params['map_encoder_bn1_bias'],
+                         self.params['map_encoder_bn1_running_mean'], self.params['map_encoder_bn1_running_var'])
+        x = relu(x)
+        x = max_pool2d(x, kernel_size=(2, 2), stride=(2, 2))  # 224 -> 56
+        
+        # Conv2 + BN2 + ReLU + Pool2
+        x = conv2d_padded(x, self.params['map_encoder_conv2_weight'],
+                          self.params['map_encoder_conv2_bias'], stride=(2, 2), padding=(2, 2))
+        x = batch_norm2d(x, self.params['map_encoder_bn2_weight'], self.params['map_encoder_bn2_bias'],
+                         self.params['map_encoder_bn2_running_mean'], self.params['map_encoder_bn2_running_var'])
+        x = relu(x)
+        x = max_pool2d(x, kernel_size=(2, 2), stride=(2, 2))  # 28 -> 14
+        
+        # Conv3 + BN3 + ReLU + Pool3
+        x = conv2d_padded(x, self.params['map_encoder_conv3_weight'],
+                          self.params['map_encoder_conv3_bias'], stride=(1, 1), padding=(1, 1))
+        x = batch_norm2d(x, self.params['map_encoder_bn3_weight'], self.params['map_encoder_bn3_bias'],
+                         self.params['map_encoder_bn3_running_mean'], self.params['map_encoder_bn3_running_var'])
+        x = relu(x)
+        x = max_pool2d(x, kernel_size=(2, 2), stride=(2, 2))  # 14 -> 7
+        
+        # Conv4 + BN4 + ReLU
+        x = conv2d_padded(x, self.params['map_encoder_conv4_weight'],
+                          self.params['map_encoder_conv4_bias'], stride=(1, 1), padding=(1, 1))
+        x = batch_norm2d(x, self.params['map_encoder_bn4_weight'], self.params['map_encoder_bn4_bias'],
+                         self.params['map_encoder_bn4_running_mean'], self.params['map_encoder_bn4_running_var'])
+        x = relu(x)
+        
+        # Global Average Pooling
+        x = adaptive_avg_pool2d(x, output_size=(1, 1))
+        x = flatten(x)
+        
+        # FC
+        x = relu(linear(x, self.params['map_encoder_fc_weight'], self.params['map_encoder_fc_bias']))
+        
+        return x
+    
+    def set_map_image(self, map_image):
+        """Precompute and cache map features."""
+        self.cached_map_features = self.encode_map(map_image)
+    
+    def __call__(self, lidar, map_image=None):
+        """Forward pass.
+        
+        Args:
+            lidar: Input array of shape (batch_size, 1, input_dim).
+            map_image: Optional map image of shape (batch_size, 3, 224, 224).
+                       If None, uses cached features.
+        
+        Returns:
+            Output array of shape (batch_size, output_dim).
+        """
+        import numpy as np
+        
+        batch_size = lidar.shape[0]
+        
+        # LiDAR branch
+        x = relu(conv1d(lidar, self.params['conv1_weight'], self.params['conv1_bias'], self.lidar_strides['conv1']))
+        x = relu(conv1d(x, self.params['conv2_weight'], self.params['conv2_bias'], self.lidar_strides['conv2']))
+        x = relu(conv1d(x, self.params['conv3_weight'], self.params['conv3_bias'], self.lidar_strides['conv3']))
+        x = relu(conv1d(x, self.params['conv4_weight'], self.params['conv4_bias'], self.lidar_strides['conv4']))
+        x = relu(conv1d(x, self.params['conv5_weight'], self.params['conv5_bias'], self.lidar_strides['conv5']))
+        lidar_features = flatten(x)
+        
+        # Map branch
+        if map_image is not None:
+            map_features = self.encode_map(map_image)
+        elif self.cached_map_features is not None:
+            map_features = np.broadcast_to(self.cached_map_features, (batch_size, self.map_feature_dim)).copy()
+        else:
+            raise ValueError("No map image provided and no cached features available.")
+        
+        # Late fusion
+        fused = np.concatenate([lidar_features, map_features], axis=1)
+        
+        # Regression head
+        x = relu(linear(fused, self.params['fc1_weight'], self.params['fc1_bias']))
+        x = relu(linear(x, self.params['fc2_weight'], self.params['fc2_bias']))
+        x = relu(linear(x, self.params['fc3_weight'], self.params['fc3_bias']))
+        
+        return tanh(linear(x, self.params['fc4_weight'], self.params['fc4_bias']))
 
 
 # =============================================================================

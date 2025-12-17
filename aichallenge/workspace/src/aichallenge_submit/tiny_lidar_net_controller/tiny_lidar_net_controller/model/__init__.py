@@ -7,9 +7,12 @@ from .numpy.layers import (
     softmax,    
     conv1d,
     conv1d_padded,
-    conv2d,     
+    conv2d,
+    conv2d_padded,
     max_pool2d,
     batch_norm1d,
+    batch_norm2d,
+    adaptive_avg_pool2d,
 )
 
 from .numpy.initializers import (

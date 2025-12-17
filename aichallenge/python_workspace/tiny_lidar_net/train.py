@@ -2,6 +2,8 @@ from pathlib import Path
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torchvision import transforms
+from PIL import Image
 from tqdm import tqdm
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -10,13 +12,33 @@ from datetime import datetime
 
 from lib.model import (
     TinyLidarNet, TinyLidarNetSmall, TinyLidarNetDeep, TinyLidarNetFusion,
-    TinyLidarNetStacked, TinyLidarNetBiLSTM, TinyLidarNetTCN
+    TinyLidarNetStacked, TinyLidarNetBiLSTM, TinyLidarNetTCN, TinyLidarNetMap
 )
 from lib.data import MultiSeqConcatDataset
 from lib.loss import WeightedSmoothL1Loss
 
 # Temporal model names
 TEMPORAL_MODELS = ["TinyLidarNetStacked", "TinyLidarNetBiLSTM", "TinyLidarNetTCN"]
+
+
+def load_map_image(map_path: str, device: torch.device) -> torch.Tensor:
+    """Load and preprocess map image for TinyLidarNetMap.
+    
+    Args:
+        map_path: Path to the map image file.
+        device: Device to load the tensor to.
+    
+    Returns:
+        Map image tensor of shape (1, 3, 224, 224).
+    """
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),  # Converts to [0, 1] range
+    ])
+    
+    img = Image.open(map_path).convert('RGB')
+    img_tensor = transform(img).unsqueeze(0)  # (1, 3, 224, 224)
+    return img_tensor.to(device)
 
 
 
@@ -40,6 +62,7 @@ def main(cfg: DictConfig):
     model_name = cfg.model.name
     is_temporal = model_name in TEMPORAL_MODELS
     use_fusion = model_name == "TinyLidarNetFusion"
+    use_map = model_name == "TinyLidarNetMap"
     
     # Temporal models and Fusion model require odometry data
     use_odom = is_temporal or use_fusion or cfg.model.get("use_odom", False)
@@ -51,6 +74,8 @@ def main(cfg: DictConfig):
         print(f"[INFO] Using temporal model: {model_name} with seq_len={seq_len}")
     elif use_fusion:
         print("[INFO] Using TinyLidarNetFusion - loading odometry data")
+    elif use_map:
+        print("[INFO] Using TinyLidarNetMap - loading map image")
 
     # Data augmentation settings (defaults: ON)
     augment_mirror = cfg.data.get("augment_mirror", True)
@@ -144,6 +169,22 @@ def main(cfg: DictConfig):
             causal=causal,
             output_dim=cfg.model.output_dim
         ).to(device)
+    elif model_name == "TinyLidarNetMap":
+        map_feature_dim = cfg.model.get("map_feature_dim", 128)
+        model = TinyLidarNetMap(
+            input_dim=cfg.model.input_dim,
+            map_feature_dim=map_feature_dim,
+            output_dim=cfg.model.output_dim
+        ).to(device)
+        
+        # Load and cache map image
+        map_image_path = cfg.model.get("map_image_path", None)
+        if map_image_path:
+            map_image = load_map_image(map_image_path, device)
+            model.set_map_image(map_image)
+            print(f"[INFO] Map image loaded and cached from: {map_image_path}")
+        else:
+            print("[WARN] No map_image_path specified - model will require map_image in forward()")
     else:
         model = TinyLidarNet(
             input_dim=cfg.model.input_dim,
@@ -212,6 +253,16 @@ def main(cfg: DictConfig):
                     targets = clean_numerical_tensor(targets)
                     
                     outputs = model(scans, odom)
+                elif use_map:
+                    # Map model: (scans, targets) - uses cached map features
+                    scans, targets = batch
+                    scans = scans.unsqueeze(1).to(device)
+                    targets = targets.to(device)
+                    
+                    scans = clean_numerical_tensor(scans)
+                    targets = clean_numerical_tensor(targets)
+                    
+                    outputs = model(scans)  # Uses cached map features
                 else:
                     # Standard model: (scans, targets)
                     scans, targets = batch
@@ -233,7 +284,7 @@ def main(cfg: DictConfig):
             avg_train_loss = train_loss / len(train_loader)
             avg_val_loss = validate(
                 model, val_loader, device, criterion, 
-                use_odom=use_odom, is_temporal=is_temporal, model_name=model_name
+                use_odom=use_odom, is_temporal=is_temporal, use_map=use_map, model_name=model_name
             )
 
             print(f"Epoch {epoch+1:03d}: Train={avg_train_loss:.4f} | Val={avg_val_loss:.4f}")
@@ -258,7 +309,7 @@ def main(cfg: DictConfig):
 
 def validate(
     model, loader, device, criterion, 
-    use_odom: bool = False, is_temporal: bool = False, model_name: str = ""
+    use_odom: bool = False, is_temporal: bool = False, use_map: bool = False, model_name: str = ""
 ):
     model.eval()
     total_loss = 0.0
@@ -292,6 +343,16 @@ def validate(
                 targets = clean_numerical_tensor(targets)
                 
                 outputs = model(scans, odom)
+            elif use_map:
+                # Map model: (scans, targets) - uses cached map features
+                scans, targets = batch
+                scans = scans.unsqueeze(1).to(device)
+                targets = targets.to(device)
+                
+                scans = clean_numerical_tensor(scans)
+                targets = clean_numerical_tensor(targets)
+                
+                outputs = model(scans)  # Uses cached map features
             else:
                 # Standard model: (scans, targets)
                 scans, targets = batch
