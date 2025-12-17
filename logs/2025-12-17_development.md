@@ -526,6 +526,201 @@ ls -la /aichallenge/python_workspace/tiny_lidar_net/weights/*.npy
 
 ---
 
+---
+
+## 🗺️ BEV Map Encoder Ablation Study
+
+### 背景
+事前スキャンされたマップ情報（`lane.csv`）をTinyLiDARNetに統合し、走行性能を向上させる。
+Ablation Study用に3つのBEVエンコーダパターンを実装。
+
+### BEV (Bird's Eye View) とは
+車両周辺の環境を鳥瞰図として表現した2Dグリッド。車線境界をラスタライズして入力特徴量として使用。
+
+### 3つのパターン
+
+| Pattern | Architecture | BEV Type | Grid Size | Channels | 特徴 |
+|---------|--------------|----------|-----------|----------|------|
+| **A** | `local_bev` | Local | 64×64 | 2 | 車両中心、yaw回転あり |
+| **B** | `global_bev` | Global | 128×128 | 3 | マップ固定座標、回転なし |
+| **C** | `dual_bev` | Both | 64×64 + 128×128 | 2 + 3 | 両方を統合 |
+
+### Local BEV vs Global BEV
+
+#### Local BEV（パターンA）
+```
+特徴:
+- 車両位置を中心とした局所座標系
+- 車両のyaw角に合わせて回転（前方が常に上）
+- 近傍の車線境界を高解像度でキャプチャ
+- Channel 0: 左境界, Channel 1: 右境界
+
+用途:
+- 局所的な障害物回避
+- レーン追従
+- 直近の道路形状把握
+```
+
+#### Global BEV（パターンB）
+```
+特徴:
+- マップ固定座標系（回転なし）
+- より広い範囲をカバー（192m × 192m）
+- 自車位置を3チャンネル目にマーカーとして描画
+- Channel 0: 左境界, Channel 1: 右境界, Channel 2: 自車位置
+
+用途:
+- 大局的な経路計画
+- コース全体の把握
+- 先の曲がり角の認識
+```
+
+### アーキテクチャ詳細
+
+#### Pattern A: TinyLidarNetLocalBEV
+```
+入力:
+  - lidar: (batch, 1, input_dim)
+  - local_bev: (batch, 2, 64, 64)
+  - state: (batch, 13)
+
+[LiDAR Branch]
+  Conv1D(1→24→36→48→64→64) → Flatten → 1792
+
+[Local BEV Branch]
+  Conv2D(2→16→32→64) stride=2, padding=1
+  → Flatten → FC(→256)
+
+[State Branch]
+  FC(13→64)
+
+[Fusion]
+  Concat(1792 + 256 + 64) → FC Head → Output (2)
+```
+
+#### Pattern B: TinyLidarNetGlobalBEV
+```
+入力:
+  - lidar: (batch, 1, input_dim)
+  - global_bev: (batch, 3, 128, 128)
+  - state: (batch, 13)
+
+[LiDAR Branch]
+  (same as above)
+
+[Global BEV Branch]
+  Conv2D(3→16→32→64→64) stride=2, padding=1  # 4 layers for 128x128
+  → Flatten → FC(→256)
+
+[State Branch]
+  FC(13→64)
+
+[Fusion]
+  Concat(1792 + 256 + 64) → FC Head → Output (2)
+```
+
+#### Pattern C: TinyLidarNetDualBEV
+```
+入力:
+  - lidar: (batch, 1, input_dim)
+  - local_bev: (batch, 2, 64, 64)
+  - global_bev: (batch, 3, 128, 128)
+  - state: (batch, 13)
+
+[LiDAR Branch]
+  → 1792
+
+[Local BEV Branch]
+  → 256
+
+[Global BEV Branch]
+  → 256
+
+[State Branch]
+  → 64
+
+[Fusion]
+  Concat(1792 + 256 + 256 + 64 = 2368)
+  → FC(256) → FC(64) → FC(10) → FC(2)
+```
+
+### 座標変換
+
+#### 問題
+`lane.csv`の座標とLocalization座標（`/localization/kinematic_state`）は両方ともMGRS座標系。
+値が大きすぎるため、共通のオフセットで正規化が必要。
+
+#### 解決策（laserscan_generatorと同じ方式）
+```cpp
+// lane.csvの最初の点をオフセットとして使用
+if (!is_offset_initialized_) {
+    map_offset_ = first_point;
+    is_offset_initialized_ = true;
+}
+
+// マップ座標に適用
+map_point.x -= map_offset_.x;
+map_point.y -= map_offset_.y;
+
+// Localization座標にも同じオフセットを適用
+ego_x -= map_offset_.x;
+ego_y -= map_offset_.y;
+```
+
+### 変更ファイル一覧
+
+| ファイル | 変更内容 |
+|----------|----------|
+| `bev_generator.py` | `generate_local()`, `generate_global()` メソッド追加 |
+| `model/tinylidarnet.py` | 6クラス追加（PyTorch 3 + NumPy 3） |
+| `tiny_lidar_net_controller_core.py` | BEVアーキテクチャ対応、`process_with_bev()` 等 |
+| `tiny_lidar_net_controller_node.py` | マップ読み込み、BEV生成、座標変換統合 |
+| `config/tiny_lidar_net_node.param.yaml` | BEVパラメータ追加 |
+
+### 使用方法
+
+#### パラメータ設定
+```yaml
+# tiny_lidar_net_node.param.yaml
+model:
+  architecture: "local_bev"  # or "global_bev" or "dual_bev"
+  ckpt_path: "/path/to/trained_weights.npy"
+
+bev:
+  map_path: "/path/to/lane.csv"  # 必須
+  local_size: 64
+  local_resolution: 1.0      # 64m × 64m カバー
+  local_channels: 2
+  global_size: 128
+  global_resolution: 1.5     # 192m × 192m カバー
+  global_channels: 3
+```
+
+#### lane.csv の生成
+```bash
+# osm2csv.py を使用（既存ツール）
+python3 osm2csv.py \
+  /path/to/lanelet2_map.osm \
+  /path/to/lane.csv
+```
+
+### Ablation Study 計画
+
+| 実験 | Architecture | 仮説 |
+|------|--------------|------|
+| Baseline | `large` (LiDAR only) | ベースライン |
+| Exp A | `local_bev` | 局所的な車線追従が向上 |
+| Exp B | `global_bev` | 先読みによりコーナリング改善 |
+| Exp C | `dual_bev` | 両方の利点を統合 |
+
+### 期待される効果
+
+1. **レーン逸脱防止**: 車線境界を明示的に入力することで、逸脱を減らす
+2. **コーナリング改善**: 先のカーブを事前に認識し、早めの減速・ステアリング
+3. **ドメインギャップ軽減**: マップ情報は学習/推論環境で共通
+
+---
+
 ## 📚 参考
 
 - [TinyLidarNet Paper (arXiv:2410.07447)](https://arxiv.org/abs/2410.07447)

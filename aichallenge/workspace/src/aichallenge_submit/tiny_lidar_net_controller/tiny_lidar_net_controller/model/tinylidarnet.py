@@ -1241,3 +1241,1052 @@ class TinyLidarNetTCNNp:
         # Output head
         out = relu(linear(out, self.params['fc1_weight'], self.params['fc1_bias']))
         return tanh(linear(out, self.params['fc2_weight'], self.params['fc2_bias']))
+
+
+# =============================================================================
+# Map-Enhanced Models (BEV Fusion)
+# =============================================================================
+
+class TinyLidarNetMap(nn.Module):
+    """Multi-modal CNN model fusing LiDAR with BEV map and kinematic state.
+
+    Architecture:
+    - LiDAR branch: Conv1D encoder (same as TinyLidarNet)
+    - BEV branch: Conv2D encoder for bird's eye view map
+    - State branch: FC layer for kinematic state
+    - Late fusion of all three branches
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 1080,
+        state_dim: int = 13,
+        bev_size: int = 64,
+        bev_channels: int = 2,
+        output_dim: int = 2
+    ):
+        """Initializes TinyLidarNetMap.
+
+        Args:
+            input_dim: Size of the input LiDAR scan array.
+            state_dim: Size of the kinematic state vector.
+            bev_size: Size of the BEV grid (bev_size x bev_size).
+            bev_channels: Number of BEV input channels.
+            output_dim: Size of the output prediction.
+        """
+        super().__init__()
+        
+        self.input_dim = input_dim
+        self.state_dim = state_dim
+        self.bev_size = bev_size
+        self.bev_channels = bev_channels
+
+        # --- LiDAR Branch (same as TinyLidarNet) ---
+        self.lidar_conv1 = nn.Conv1d(1, 24, kernel_size=10, stride=4)
+        self.lidar_conv2 = nn.Conv1d(24, 36, kernel_size=8, stride=4)
+        self.lidar_conv3 = nn.Conv1d(36, 48, kernel_size=4, stride=2)
+        self.lidar_conv4 = nn.Conv1d(48, 64, kernel_size=3)
+        self.lidar_conv5 = nn.Conv1d(64, 64, kernel_size=3)
+
+        with torch.no_grad():
+            dummy_lidar = torch.zeros(1, 1, input_dim)
+            x = self.lidar_conv5(self.lidar_conv4(self.lidar_conv3(
+                self.lidar_conv2(self.lidar_conv1(dummy_lidar)))))
+            lidar_flatten_dim = x.view(1, -1).shape[1]
+
+        # --- BEV Branch (Conv2D encoder) ---
+        self.bev_conv1 = nn.Conv2d(bev_channels, 16, kernel_size=3, stride=2, padding=1)
+        self.bev_conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1)
+        self.bev_conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)
+        
+        with torch.no_grad():
+            dummy_bev = torch.zeros(1, bev_channels, bev_size, bev_size)
+            x = self.bev_conv3(self.bev_conv2(self.bev_conv1(dummy_bev)))
+            bev_flatten_dim = x.view(1, -1).shape[1]
+        
+        self.bev_fc = nn.Linear(bev_flatten_dim, 256)
+
+        # --- State Branch ---
+        self.state_fc = nn.Linear(state_dim, 64)
+        
+        # --- Fusion Head ---
+        # lidar_flatten_dim + 256 (bev) + 64 (state)
+        fusion_dim = lidar_flatten_dim + 256 + 64
+        
+        self.fc1 = nn.Linear(fusion_dim, 100)
+        self.fc2 = nn.Linear(100, 50)
+        self.fc3 = nn.Linear(50, 10)
+        self.fc4 = nn.Linear(10, output_dim)
+
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        """Initializes weights using Kaiming Normal (He) initialization."""
+        for m in self.modules():
+            if isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Linear)):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(self, lidar, bev, state):
+        """Forward pass with LiDAR, BEV map, and kinematic state inputs.
+
+        Args:
+            lidar: Input tensor of shape (batch_size, 1, input_dim).
+            bev: Input tensor of shape (batch_size, bev_channels, bev_size, bev_size).
+            state: Input tensor of shape (batch_size, state_dim).
+
+        Returns:
+            Output tensor of shape (batch_size, output_dim) with Tanh activation.
+        """
+        # LiDAR branch
+        x_lidar = F.relu(self.lidar_conv1(lidar))
+        x_lidar = F.relu(self.lidar_conv2(x_lidar))
+        x_lidar = F.relu(self.lidar_conv3(x_lidar))
+        x_lidar = F.relu(self.lidar_conv4(x_lidar))
+        x_lidar = F.relu(self.lidar_conv5(x_lidar))
+        lidar_features = x_lidar.view(x_lidar.size(0), -1)
+        
+        # BEV branch
+        x_bev = F.relu(self.bev_conv1(bev))
+        x_bev = F.relu(self.bev_conv2(x_bev))
+        x_bev = F.relu(self.bev_conv3(x_bev))
+        x_bev = x_bev.view(x_bev.size(0), -1)
+        bev_features = F.relu(self.bev_fc(x_bev))
+        
+        # State branch
+        state_features = F.relu(self.state_fc(state))
+        
+        # Late fusion
+        fused = torch.cat([lidar_features, bev_features, state_features], dim=1)
+        
+        # Regression head
+        x = F.relu(self.fc1(fused))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        return torch.tanh(self.fc4(x))
+
+
+class TinyLidarNetMapNp:
+    """NumPy implementation of TinyLidarNetMap.
+
+    Multi-modal architecture that fuses LiDAR data with BEV map representation
+    and kinematic state. Uses Late Fusion approach for pure NumPy inference.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 1080,
+        state_dim: int = 13,
+        bev_size: int = 64,
+        bev_channels: int = 2,
+        output_dim: int = 2
+    ):
+        """Initializes TinyLidarNetMapNp.
+
+        Args:
+            input_dim: Size of the input LiDAR scan array.
+            state_dim: Size of the kinematic state vector.
+            bev_size: Size of the BEV grid (bev_size x bev_size).
+            bev_channels: Number of BEV input channels.
+            output_dim: Size of the output prediction.
+        """
+        self.input_dim = input_dim
+        self.state_dim = state_dim
+        self.bev_size = bev_size
+        self.bev_channels = bev_channels
+        self.output_dim = output_dim
+        self.params = {}
+
+        # Stride definitions for LiDAR conv layers
+        self.lidar_strides = {'conv1': 4, 'conv2': 4, 'conv3': 2, 'conv4': 1, 'conv5': 1}
+        
+        # BEV conv strides
+        self.bev_strides = {'conv1': 2, 'conv2': 2, 'conv3': 2}
+
+        # LiDAR branch shapes (same as TinyLidarNet)
+        self.shapes = {
+            'lidar_conv1_weight': (24, 1, 10),  'lidar_conv1_bias': (24,),
+            'lidar_conv2_weight': (36, 24, 8),  'lidar_conv2_bias': (36,),
+            'lidar_conv3_weight': (48, 36, 4),  'lidar_conv3_bias': (48,),
+            'lidar_conv4_weight': (64, 48, 3),  'lidar_conv4_bias': (64,),
+            'lidar_conv5_weight': (64, 64, 3),  'lidar_conv5_bias': (64,),
+        }
+
+        # BEV branch shapes (Conv2D with padding=1)
+        self.shapes.update({
+            'bev_conv1_weight': (16, bev_channels, 3, 3), 'bev_conv1_bias': (16,),
+            'bev_conv2_weight': (32, 16, 3, 3),          'bev_conv2_bias': (32,),
+            'bev_conv3_weight': (64, 32, 3, 3),          'bev_conv3_bias': (64,),
+        })
+
+        # Calculate flatten dimensions
+        lidar_flatten_dim = self._get_lidar_output_dim()
+        bev_flatten_dim = self._get_bev_output_dim()
+        
+        # BEV FC
+        self.shapes.update({
+            'bev_fc_weight': (256, bev_flatten_dim), 'bev_fc_bias': (256,),
+        })
+
+        # State branch
+        self.shapes.update({
+            'state_fc_weight': (64, state_dim), 'state_fc_bias': (64,),
+        })
+
+        # Fusion head
+        fusion_dim = lidar_flatten_dim + 256 + 64
+        
+        self.shapes.update({
+            'fc1_weight': (100, fusion_dim), 'fc1_bias': (100,),
+            'fc2_weight': (50, 100),         'fc2_bias': (50,),
+            'fc3_weight': (10, 50),          'fc3_bias': (10,),
+            'fc4_weight': (output_dim, 10),  'fc4_bias': (output_dim,),
+        })
+
+        self._initialize_weights()
+
+    def _get_lidar_output_dim(self) -> int:
+        """Calculates the flattened dimension after LiDAR conv layers."""
+        l = self.input_dim
+        kernels = [10, 8, 4, 3, 3]
+        strides = [4, 4, 2, 1, 1]
+        channels = 64
+        
+        for k, s in zip(kernels, strides):
+            l = (l - k) // s + 1
+        
+        return channels * l
+
+    def _get_bev_output_dim(self) -> int:
+        """Calculates the flattened dimension after BEV conv layers."""
+        # Conv2D with padding=1, stride=2, kernel=3
+        # output_size = floor((input_size + 2*padding - kernel_size) / stride) + 1
+        # = floor((input_size + 2 - 3) / 2) + 1 = floor((input_size - 1) / 2) + 1
+        h = w = self.bev_size
+        for _ in range(3):
+            h = (h + 2 * 1 - 3) // 2 + 1
+            w = (w + 2 * 1 - 3) // 2 + 1
+        
+        return 64 * h * w
+
+    def _initialize_weights(self):
+        """Initializes weights using Kaiming Normal (fan_out) and biases to zero."""
+        for name, shape in self.shapes.items():
+            if name.endswith('_weight'):
+                if 'conv' in name:
+                    # Conv weight: use last dimension for fan_out calculation
+                    if len(shape) == 4:  # Conv2D
+                        fan_out = shape[0] * shape[2] * shape[3]
+                    else:  # Conv1D
+                        fan_out = shape[0] * shape[2]
+                else:
+                    fan_out = shape[0]
+                self.params[name] = kaiming_normal_init(shape, fan_out)
+            elif name.endswith('_bias'):
+                self.params[name] = zeros_init(shape)
+
+    def _conv2d_padded(self, x, weight, bias, stride, padding):
+        """Apply 2D convolution with padding."""
+        import numpy as np
+        
+        if padding > 0:
+            x = np.pad(x, ((0, 0), (0, 0), (padding, padding), (padding, padding)), 
+                      mode='constant', constant_values=0)
+        
+        return conv2d(x, weight, bias, stride=(stride, stride))
+
+    def __call__(self, lidar, bev, state):
+        """Performs the forward pass of the model.
+
+        Args:
+            lidar: Input array of shape (batch_size, 1, input_dim).
+            bev: Input array of shape (batch_size, bev_channels, bev_size, bev_size).
+            state: Input array of shape (batch_size, state_dim).
+
+        Returns:
+            Output array of shape (batch_size, output_dim).
+        """
+        import numpy as np
+        
+        # LiDAR branch
+        x = relu(conv1d(lidar, self.params['lidar_conv1_weight'], 
+                       self.params['lidar_conv1_bias'], self.lidar_strides['conv1']))
+        x = relu(conv1d(x, self.params['lidar_conv2_weight'], 
+                       self.params['lidar_conv2_bias'], self.lidar_strides['conv2']))
+        x = relu(conv1d(x, self.params['lidar_conv3_weight'], 
+                       self.params['lidar_conv3_bias'], self.lidar_strides['conv3']))
+        x = relu(conv1d(x, self.params['lidar_conv4_weight'], 
+                       self.params['lidar_conv4_bias'], self.lidar_strides['conv4']))
+        x = relu(conv1d(x, self.params['lidar_conv5_weight'], 
+                       self.params['lidar_conv5_bias'], self.lidar_strides['conv5']))
+        lidar_features = flatten(x)
+        
+        # BEV branch
+        x_bev = relu(self._conv2d_padded(bev, self.params['bev_conv1_weight'],
+                                         self.params['bev_conv1_bias'], 
+                                         stride=2, padding=1))
+        x_bev = relu(self._conv2d_padded(x_bev, self.params['bev_conv2_weight'],
+                                         self.params['bev_conv2_bias'],
+                                         stride=2, padding=1))
+        x_bev = relu(self._conv2d_padded(x_bev, self.params['bev_conv3_weight'],
+                                         self.params['bev_conv3_bias'],
+                                         stride=2, padding=1))
+        x_bev = flatten(x_bev)
+        bev_features = relu(linear(x_bev, self.params['bev_fc_weight'], 
+                                   self.params['bev_fc_bias']))
+        
+        # State branch
+        state_features = relu(linear(state, self.params['state_fc_weight'], 
+                                     self.params['state_fc_bias']))
+        
+        # Late fusion (concatenate along feature dimension)
+        fused = np.concatenate([lidar_features, bev_features, state_features], axis=1)
+        
+        # Regression head
+        x = relu(linear(fused, self.params['fc1_weight'], self.params['fc1_bias']))
+        x = relu(linear(x, self.params['fc2_weight'], self.params['fc2_bias']))
+        x = relu(linear(x, self.params['fc3_weight'], self.params['fc3_bias']))
+        
+        return tanh(linear(x, self.params['fc4_weight'], self.params['fc4_bias']))
+
+
+# =============================================================================
+# Ablation Study Models - Local, Global, and Dual BEV
+# =============================================================================
+
+class TinyLidarNetLocalBEV(nn.Module):
+    """Pattern A: LiDAR + Local BEV + State fusion.
+    
+    Local BEV characteristics:
+    - Vehicle-centered, rotated to vehicle heading
+    - 64x64 grid, 2 channels (left/right boundaries)
+    - Good for local perception and obstacle avoidance
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 1080,
+        state_dim: int = 13,
+        local_bev_size: int = 64,
+        local_bev_channels: int = 2,
+        output_dim: int = 2
+    ):
+        super().__init__()
+        
+        self.input_dim = input_dim
+        self.state_dim = state_dim
+        self.local_bev_size = local_bev_size
+        self.local_bev_channels = local_bev_channels
+
+        # --- LiDAR Branch ---
+        self.lidar_conv1 = nn.Conv1d(1, 24, kernel_size=10, stride=4)
+        self.lidar_conv2 = nn.Conv1d(24, 36, kernel_size=8, stride=4)
+        self.lidar_conv3 = nn.Conv1d(36, 48, kernel_size=4, stride=2)
+        self.lidar_conv4 = nn.Conv1d(48, 64, kernel_size=3)
+        self.lidar_conv5 = nn.Conv1d(64, 64, kernel_size=3)
+
+        with torch.no_grad():
+            dummy_lidar = torch.zeros(1, 1, input_dim)
+            x = self.lidar_conv5(self.lidar_conv4(self.lidar_conv3(
+                self.lidar_conv2(self.lidar_conv1(dummy_lidar)))))
+            lidar_flatten_dim = x.view(1, -1).shape[1]
+
+        # --- Local BEV Branch ---
+        self.local_bev_conv1 = nn.Conv2d(local_bev_channels, 16, kernel_size=3, stride=2, padding=1)
+        self.local_bev_conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1)
+        self.local_bev_conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)
+        
+        with torch.no_grad():
+            dummy_bev = torch.zeros(1, local_bev_channels, local_bev_size, local_bev_size)
+            x = self.local_bev_conv3(self.local_bev_conv2(self.local_bev_conv1(dummy_bev)))
+            local_bev_flatten_dim = x.view(1, -1).shape[1]
+        
+        self.local_bev_fc = nn.Linear(local_bev_flatten_dim, 256)
+
+        # --- State Branch ---
+        self.state_fc = nn.Linear(state_dim, 64)
+        
+        # --- Fusion Head ---
+        fusion_dim = lidar_flatten_dim + 256 + 64
+        
+        self.fc1 = nn.Linear(fusion_dim, 100)
+        self.fc2 = nn.Linear(100, 50)
+        self.fc3 = nn.Linear(50, 10)
+        self.fc4 = nn.Linear(10, output_dim)
+
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Linear)):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(self, lidar, local_bev, state):
+        # LiDAR branch
+        x_lidar = F.relu(self.lidar_conv1(lidar))
+        x_lidar = F.relu(self.lidar_conv2(x_lidar))
+        x_lidar = F.relu(self.lidar_conv3(x_lidar))
+        x_lidar = F.relu(self.lidar_conv4(x_lidar))
+        x_lidar = F.relu(self.lidar_conv5(x_lidar))
+        lidar_features = x_lidar.view(x_lidar.size(0), -1)
+        
+        # Local BEV branch
+        x_bev = F.relu(self.local_bev_conv1(local_bev))
+        x_bev = F.relu(self.local_bev_conv2(x_bev))
+        x_bev = F.relu(self.local_bev_conv3(x_bev))
+        x_bev = x_bev.view(x_bev.size(0), -1)
+        local_bev_features = F.relu(self.local_bev_fc(x_bev))
+        
+        # State branch
+        state_features = F.relu(self.state_fc(state))
+        
+        # Late fusion
+        fused = torch.cat([lidar_features, local_bev_features, state_features], dim=1)
+        
+        # Regression head
+        x = F.relu(self.fc1(fused))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        return torch.tanh(self.fc4(x))
+
+
+class TinyLidarNetGlobalBEV(nn.Module):
+    """Pattern B: LiDAR + Global BEV + State fusion.
+    
+    Global BEV characteristics:
+    - Map-fixed coordinates, no rotation
+    - 128x128 grid, 3 channels (left/right boundaries + ego position)
+    - Good for global planning and route understanding
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 1080,
+        state_dim: int = 13,
+        global_bev_size: int = 128,
+        global_bev_channels: int = 3,
+        output_dim: int = 2
+    ):
+        super().__init__()
+        
+        self.input_dim = input_dim
+        self.state_dim = state_dim
+        self.global_bev_size = global_bev_size
+        self.global_bev_channels = global_bev_channels
+
+        # --- LiDAR Branch ---
+        self.lidar_conv1 = nn.Conv1d(1, 24, kernel_size=10, stride=4)
+        self.lidar_conv2 = nn.Conv1d(24, 36, kernel_size=8, stride=4)
+        self.lidar_conv3 = nn.Conv1d(36, 48, kernel_size=4, stride=2)
+        self.lidar_conv4 = nn.Conv1d(48, 64, kernel_size=3)
+        self.lidar_conv5 = nn.Conv1d(64, 64, kernel_size=3)
+
+        with torch.no_grad():
+            dummy_lidar = torch.zeros(1, 1, input_dim)
+            x = self.lidar_conv5(self.lidar_conv4(self.lidar_conv3(
+                self.lidar_conv2(self.lidar_conv1(dummy_lidar)))))
+            lidar_flatten_dim = x.view(1, -1).shape[1]
+
+        # --- Global BEV Branch (larger network for bigger grid) ---
+        self.global_bev_conv1 = nn.Conv2d(global_bev_channels, 16, kernel_size=3, stride=2, padding=1)
+        self.global_bev_conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1)
+        self.global_bev_conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)
+        self.global_bev_conv4 = nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1)
+        
+        with torch.no_grad():
+            dummy_bev = torch.zeros(1, global_bev_channels, global_bev_size, global_bev_size)
+            x = self.global_bev_conv4(self.global_bev_conv3(
+                self.global_bev_conv2(self.global_bev_conv1(dummy_bev))))
+            global_bev_flatten_dim = x.view(1, -1).shape[1]
+        
+        self.global_bev_fc = nn.Linear(global_bev_flatten_dim, 256)
+
+        # --- State Branch ---
+        self.state_fc = nn.Linear(state_dim, 64)
+        
+        # --- Fusion Head ---
+        fusion_dim = lidar_flatten_dim + 256 + 64
+        
+        self.fc1 = nn.Linear(fusion_dim, 100)
+        self.fc2 = nn.Linear(100, 50)
+        self.fc3 = nn.Linear(50, 10)
+        self.fc4 = nn.Linear(10, output_dim)
+
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Linear)):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(self, lidar, global_bev, state):
+        # LiDAR branch
+        x_lidar = F.relu(self.lidar_conv1(lidar))
+        x_lidar = F.relu(self.lidar_conv2(x_lidar))
+        x_lidar = F.relu(self.lidar_conv3(x_lidar))
+        x_lidar = F.relu(self.lidar_conv4(x_lidar))
+        x_lidar = F.relu(self.lidar_conv5(x_lidar))
+        lidar_features = x_lidar.view(x_lidar.size(0), -1)
+        
+        # Global BEV branch
+        x_bev = F.relu(self.global_bev_conv1(global_bev))
+        x_bev = F.relu(self.global_bev_conv2(x_bev))
+        x_bev = F.relu(self.global_bev_conv3(x_bev))
+        x_bev = F.relu(self.global_bev_conv4(x_bev))
+        x_bev = x_bev.view(x_bev.size(0), -1)
+        global_bev_features = F.relu(self.global_bev_fc(x_bev))
+        
+        # State branch
+        state_features = F.relu(self.state_fc(state))
+        
+        # Late fusion
+        fused = torch.cat([lidar_features, global_bev_features, state_features], dim=1)
+        
+        # Regression head
+        x = F.relu(self.fc1(fused))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        return torch.tanh(self.fc4(x))
+
+
+class TinyLidarNetDualBEV(nn.Module):
+    """Pattern C: LiDAR + Local BEV + Global BEV + State fusion.
+    
+    Dual BEV combines both local and global representations:
+    - Local BEV: 64x64, 2 channels (vehicle-centered)
+    - Global BEV: 128x128, 3 channels (map-fixed)
+    - Best of both worlds for comprehensive understanding
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 1080,
+        state_dim: int = 13,
+        local_bev_size: int = 64,
+        local_bev_channels: int = 2,
+        global_bev_size: int = 128,
+        global_bev_channels: int = 3,
+        output_dim: int = 2
+    ):
+        super().__init__()
+        
+        self.input_dim = input_dim
+        self.state_dim = state_dim
+
+        # --- LiDAR Branch ---
+        self.lidar_conv1 = nn.Conv1d(1, 24, kernel_size=10, stride=4)
+        self.lidar_conv2 = nn.Conv1d(24, 36, kernel_size=8, stride=4)
+        self.lidar_conv3 = nn.Conv1d(36, 48, kernel_size=4, stride=2)
+        self.lidar_conv4 = nn.Conv1d(48, 64, kernel_size=3)
+        self.lidar_conv5 = nn.Conv1d(64, 64, kernel_size=3)
+
+        with torch.no_grad():
+            dummy_lidar = torch.zeros(1, 1, input_dim)
+            x = self.lidar_conv5(self.lidar_conv4(self.lidar_conv3(
+                self.lidar_conv2(self.lidar_conv1(dummy_lidar)))))
+            lidar_flatten_dim = x.view(1, -1).shape[1]
+
+        # --- Local BEV Branch ---
+        self.local_bev_conv1 = nn.Conv2d(local_bev_channels, 16, kernel_size=3, stride=2, padding=1)
+        self.local_bev_conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1)
+        self.local_bev_conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)
+        
+        with torch.no_grad():
+            dummy_local = torch.zeros(1, local_bev_channels, local_bev_size, local_bev_size)
+            x = self.local_bev_conv3(self.local_bev_conv2(self.local_bev_conv1(dummy_local)))
+            local_bev_flatten_dim = x.view(1, -1).shape[1]
+        
+        self.local_bev_fc = nn.Linear(local_bev_flatten_dim, 256)
+
+        # --- Global BEV Branch ---
+        self.global_bev_conv1 = nn.Conv2d(global_bev_channels, 16, kernel_size=3, stride=2, padding=1)
+        self.global_bev_conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1)
+        self.global_bev_conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)
+        self.global_bev_conv4 = nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1)
+        
+        with torch.no_grad():
+            dummy_global = torch.zeros(1, global_bev_channels, global_bev_size, global_bev_size)
+            x = self.global_bev_conv4(self.global_bev_conv3(
+                self.global_bev_conv2(self.global_bev_conv1(dummy_global))))
+            global_bev_flatten_dim = x.view(1, -1).shape[1]
+        
+        self.global_bev_fc = nn.Linear(global_bev_flatten_dim, 256)
+
+        # --- State Branch ---
+        self.state_fc = nn.Linear(state_dim, 64)
+        
+        # --- Fusion Head (larger for dual BEV) ---
+        # lidar + local_bev + global_bev + state = 1792 + 256 + 256 + 64 = 2368
+        fusion_dim = lidar_flatten_dim + 256 + 256 + 64
+        
+        self.fc1 = nn.Linear(fusion_dim, 256)
+        self.fc2 = nn.Linear(256, 64)
+        self.fc3 = nn.Linear(64, 10)
+        self.fc4 = nn.Linear(10, output_dim)
+
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Linear)):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(self, lidar, local_bev, global_bev, state):
+        # LiDAR branch
+        x_lidar = F.relu(self.lidar_conv1(lidar))
+        x_lidar = F.relu(self.lidar_conv2(x_lidar))
+        x_lidar = F.relu(self.lidar_conv3(x_lidar))
+        x_lidar = F.relu(self.lidar_conv4(x_lidar))
+        x_lidar = F.relu(self.lidar_conv5(x_lidar))
+        lidar_features = x_lidar.view(x_lidar.size(0), -1)
+        
+        # Local BEV branch
+        x_local = F.relu(self.local_bev_conv1(local_bev))
+        x_local = F.relu(self.local_bev_conv2(x_local))
+        x_local = F.relu(self.local_bev_conv3(x_local))
+        x_local = x_local.view(x_local.size(0), -1)
+        local_bev_features = F.relu(self.local_bev_fc(x_local))
+        
+        # Global BEV branch
+        x_global = F.relu(self.global_bev_conv1(global_bev))
+        x_global = F.relu(self.global_bev_conv2(x_global))
+        x_global = F.relu(self.global_bev_conv3(x_global))
+        x_global = F.relu(self.global_bev_conv4(x_global))
+        x_global = x_global.view(x_global.size(0), -1)
+        global_bev_features = F.relu(self.global_bev_fc(x_global))
+        
+        # State branch
+        state_features = F.relu(self.state_fc(state))
+        
+        # Late fusion (all four branches)
+        fused = torch.cat([lidar_features, local_bev_features, global_bev_features, state_features], dim=1)
+        
+        # Regression head
+        x = F.relu(self.fc1(fused))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        return torch.tanh(self.fc4(x))
+
+
+# =============================================================================
+# NumPy Implementations for Ablation Study Models
+# =============================================================================
+
+class TinyLidarNetLocalBEVNp:
+    """NumPy implementation of TinyLidarNetLocalBEV (Pattern A)."""
+
+    def __init__(
+        self,
+        input_dim: int = 1080,
+        state_dim: int = 13,
+        local_bev_size: int = 64,
+        local_bev_channels: int = 2,
+        output_dim: int = 2
+    ):
+        self.input_dim = input_dim
+        self.state_dim = state_dim
+        self.local_bev_size = local_bev_size
+        self.local_bev_channels = local_bev_channels
+        self.output_dim = output_dim
+        self.params = {}
+
+        # LiDAR branch
+        self.lidar_strides = {'conv1': 4, 'conv2': 4, 'conv3': 2, 'conv4': 1, 'conv5': 1}
+        
+        self.shapes = {
+            'lidar_conv1_weight': (24, 1, 10),  'lidar_conv1_bias': (24,),
+            'lidar_conv2_weight': (36, 24, 8),  'lidar_conv2_bias': (36,),
+            'lidar_conv3_weight': (48, 36, 4),  'lidar_conv3_bias': (48,),
+            'lidar_conv4_weight': (64, 48, 3),  'lidar_conv4_bias': (64,),
+            'lidar_conv5_weight': (64, 64, 3),  'lidar_conv5_bias': (64,),
+        }
+
+        # Local BEV branch
+        self.shapes.update({
+            'local_bev_conv1_weight': (16, local_bev_channels, 3, 3), 'local_bev_conv1_bias': (16,),
+            'local_bev_conv2_weight': (32, 16, 3, 3), 'local_bev_conv2_bias': (32,),
+            'local_bev_conv3_weight': (64, 32, 3, 3), 'local_bev_conv3_bias': (64,),
+        })
+
+        lidar_flatten_dim = self._get_lidar_output_dim()
+        local_bev_flatten_dim = self._get_local_bev_output_dim()
+        
+        self.shapes.update({
+            'local_bev_fc_weight': (256, local_bev_flatten_dim), 'local_bev_fc_bias': (256,),
+            'state_fc_weight': (64, state_dim), 'state_fc_bias': (64,),
+        })
+
+        fusion_dim = lidar_flatten_dim + 256 + 64
+        self.shapes.update({
+            'fc1_weight': (100, fusion_dim), 'fc1_bias': (100,),
+            'fc2_weight': (50, 100), 'fc2_bias': (50,),
+            'fc3_weight': (10, 50), 'fc3_bias': (10,),
+            'fc4_weight': (output_dim, 10), 'fc4_bias': (output_dim,),
+        })
+
+        self._initialize_weights()
+
+    def _get_lidar_output_dim(self) -> int:
+        l = self.input_dim
+        for k, s in zip([10, 8, 4, 3, 3], [4, 4, 2, 1, 1]):
+            l = (l - k) // s + 1
+        return 64 * l
+
+    def _get_local_bev_output_dim(self) -> int:
+        h = w = self.local_bev_size
+        for _ in range(3):
+            h = (h + 2 - 3) // 2 + 1
+            w = (w + 2 - 3) // 2 + 1
+        return 64 * h * w
+
+    def _initialize_weights(self):
+        for name, shape in self.shapes.items():
+            if name.endswith('_weight'):
+                if 'conv' in name:
+                    fan_out = shape[0] * (shape[2] * shape[3] if len(shape) == 4 else shape[2])
+                else:
+                    fan_out = shape[0]
+                self.params[name] = kaiming_normal_init(shape, fan_out)
+            elif name.endswith('_bias'):
+                self.params[name] = zeros_init(shape)
+
+    def _conv2d_padded(self, x, weight, bias, stride, padding):
+        import numpy as np
+        if padding > 0:
+            x = np.pad(x, ((0, 0), (0, 0), (padding, padding), (padding, padding)), 
+                      mode='constant', constant_values=0)
+        return conv2d(x, weight, bias, stride=(stride, stride))
+
+    def __call__(self, lidar, local_bev, state):
+        import numpy as np
+        
+        # LiDAR branch
+        x = relu(conv1d(lidar, self.params['lidar_conv1_weight'], 
+                       self.params['lidar_conv1_bias'], self.lidar_strides['conv1']))
+        x = relu(conv1d(x, self.params['lidar_conv2_weight'], 
+                       self.params['lidar_conv2_bias'], self.lidar_strides['conv2']))
+        x = relu(conv1d(x, self.params['lidar_conv3_weight'], 
+                       self.params['lidar_conv3_bias'], self.lidar_strides['conv3']))
+        x = relu(conv1d(x, self.params['lidar_conv4_weight'], 
+                       self.params['lidar_conv4_bias'], self.lidar_strides['conv4']))
+        x = relu(conv1d(x, self.params['lidar_conv5_weight'], 
+                       self.params['lidar_conv5_bias'], self.lidar_strides['conv5']))
+        lidar_features = flatten(x)
+        
+        # Local BEV branch
+        x_bev = relu(self._conv2d_padded(local_bev, self.params['local_bev_conv1_weight'],
+                                         self.params['local_bev_conv1_bias'], stride=2, padding=1))
+        x_bev = relu(self._conv2d_padded(x_bev, self.params['local_bev_conv2_weight'],
+                                         self.params['local_bev_conv2_bias'], stride=2, padding=1))
+        x_bev = relu(self._conv2d_padded(x_bev, self.params['local_bev_conv3_weight'],
+                                         self.params['local_bev_conv3_bias'], stride=2, padding=1))
+        x_bev = flatten(x_bev)
+        local_bev_features = relu(linear(x_bev, self.params['local_bev_fc_weight'], 
+                                         self.params['local_bev_fc_bias']))
+        
+        # State branch
+        state_features = relu(linear(state, self.params['state_fc_weight'], 
+                                     self.params['state_fc_bias']))
+        
+        # Fusion
+        fused = np.concatenate([lidar_features, local_bev_features, state_features], axis=1)
+        
+        x = relu(linear(fused, self.params['fc1_weight'], self.params['fc1_bias']))
+        x = relu(linear(x, self.params['fc2_weight'], self.params['fc2_bias']))
+        x = relu(linear(x, self.params['fc3_weight'], self.params['fc3_bias']))
+        return tanh(linear(x, self.params['fc4_weight'], self.params['fc4_bias']))
+
+
+class TinyLidarNetGlobalBEVNp:
+    """NumPy implementation of TinyLidarNetGlobalBEV (Pattern B)."""
+
+    def __init__(
+        self,
+        input_dim: int = 1080,
+        state_dim: int = 13,
+        global_bev_size: int = 128,
+        global_bev_channels: int = 3,
+        output_dim: int = 2
+    ):
+        self.input_dim = input_dim
+        self.state_dim = state_dim
+        self.global_bev_size = global_bev_size
+        self.global_bev_channels = global_bev_channels
+        self.output_dim = output_dim
+        self.params = {}
+
+        # LiDAR branch
+        self.lidar_strides = {'conv1': 4, 'conv2': 4, 'conv3': 2, 'conv4': 1, 'conv5': 1}
+        
+        self.shapes = {
+            'lidar_conv1_weight': (24, 1, 10),  'lidar_conv1_bias': (24,),
+            'lidar_conv2_weight': (36, 24, 8),  'lidar_conv2_bias': (36,),
+            'lidar_conv3_weight': (48, 36, 4),  'lidar_conv3_bias': (48,),
+            'lidar_conv4_weight': (64, 48, 3),  'lidar_conv4_bias': (64,),
+            'lidar_conv5_weight': (64, 64, 3),  'lidar_conv5_bias': (64,),
+        }
+
+        # Global BEV branch (4 conv layers)
+        self.shapes.update({
+            'global_bev_conv1_weight': (16, global_bev_channels, 3, 3), 'global_bev_conv1_bias': (16,),
+            'global_bev_conv2_weight': (32, 16, 3, 3), 'global_bev_conv2_bias': (32,),
+            'global_bev_conv3_weight': (64, 32, 3, 3), 'global_bev_conv3_bias': (64,),
+            'global_bev_conv4_weight': (64, 64, 3, 3), 'global_bev_conv4_bias': (64,),
+        })
+
+        lidar_flatten_dim = self._get_lidar_output_dim()
+        global_bev_flatten_dim = self._get_global_bev_output_dim()
+        
+        self.shapes.update({
+            'global_bev_fc_weight': (256, global_bev_flatten_dim), 'global_bev_fc_bias': (256,),
+            'state_fc_weight': (64, state_dim), 'state_fc_bias': (64,),
+        })
+
+        fusion_dim = lidar_flatten_dim + 256 + 64
+        self.shapes.update({
+            'fc1_weight': (100, fusion_dim), 'fc1_bias': (100,),
+            'fc2_weight': (50, 100), 'fc2_bias': (50,),
+            'fc3_weight': (10, 50), 'fc3_bias': (10,),
+            'fc4_weight': (output_dim, 10), 'fc4_bias': (output_dim,),
+        })
+
+        self._initialize_weights()
+
+    def _get_lidar_output_dim(self) -> int:
+        l = self.input_dim
+        for k, s in zip([10, 8, 4, 3, 3], [4, 4, 2, 1, 1]):
+            l = (l - k) // s + 1
+        return 64 * l
+
+    def _get_global_bev_output_dim(self) -> int:
+        h = w = self.global_bev_size
+        for _ in range(4):  # 4 conv layers
+            h = (h + 2 - 3) // 2 + 1
+            w = (w + 2 - 3) // 2 + 1
+        return 64 * h * w
+
+    def _initialize_weights(self):
+        for name, shape in self.shapes.items():
+            if name.endswith('_weight'):
+                if 'conv' in name:
+                    fan_out = shape[0] * (shape[2] * shape[3] if len(shape) == 4 else shape[2])
+                else:
+                    fan_out = shape[0]
+                self.params[name] = kaiming_normal_init(shape, fan_out)
+            elif name.endswith('_bias'):
+                self.params[name] = zeros_init(shape)
+
+    def _conv2d_padded(self, x, weight, bias, stride, padding):
+        import numpy as np
+        if padding > 0:
+            x = np.pad(x, ((0, 0), (0, 0), (padding, padding), (padding, padding)), 
+                      mode='constant', constant_values=0)
+        return conv2d(x, weight, bias, stride=(stride, stride))
+
+    def __call__(self, lidar, global_bev, state):
+        import numpy as np
+        
+        # LiDAR branch
+        x = relu(conv1d(lidar, self.params['lidar_conv1_weight'], 
+                       self.params['lidar_conv1_bias'], self.lidar_strides['conv1']))
+        x = relu(conv1d(x, self.params['lidar_conv2_weight'], 
+                       self.params['lidar_conv2_bias'], self.lidar_strides['conv2']))
+        x = relu(conv1d(x, self.params['lidar_conv3_weight'], 
+                       self.params['lidar_conv3_bias'], self.lidar_strides['conv3']))
+        x = relu(conv1d(x, self.params['lidar_conv4_weight'], 
+                       self.params['lidar_conv4_bias'], self.lidar_strides['conv4']))
+        x = relu(conv1d(x, self.params['lidar_conv5_weight'], 
+                       self.params['lidar_conv5_bias'], self.lidar_strides['conv5']))
+        lidar_features = flatten(x)
+        
+        # Global BEV branch
+        x_bev = relu(self._conv2d_padded(global_bev, self.params['global_bev_conv1_weight'],
+                                         self.params['global_bev_conv1_bias'], stride=2, padding=1))
+        x_bev = relu(self._conv2d_padded(x_bev, self.params['global_bev_conv2_weight'],
+                                         self.params['global_bev_conv2_bias'], stride=2, padding=1))
+        x_bev = relu(self._conv2d_padded(x_bev, self.params['global_bev_conv3_weight'],
+                                         self.params['global_bev_conv3_bias'], stride=2, padding=1))
+        x_bev = relu(self._conv2d_padded(x_bev, self.params['global_bev_conv4_weight'],
+                                         self.params['global_bev_conv4_bias'], stride=2, padding=1))
+        x_bev = flatten(x_bev)
+        global_bev_features = relu(linear(x_bev, self.params['global_bev_fc_weight'], 
+                                          self.params['global_bev_fc_bias']))
+        
+        # State branch
+        state_features = relu(linear(state, self.params['state_fc_weight'], 
+                                     self.params['state_fc_bias']))
+        
+        # Fusion
+        fused = np.concatenate([lidar_features, global_bev_features, state_features], axis=1)
+        
+        x = relu(linear(fused, self.params['fc1_weight'], self.params['fc1_bias']))
+        x = relu(linear(x, self.params['fc2_weight'], self.params['fc2_bias']))
+        x = relu(linear(x, self.params['fc3_weight'], self.params['fc3_bias']))
+        return tanh(linear(x, self.params['fc4_weight'], self.params['fc4_bias']))
+
+
+class TinyLidarNetDualBEVNp:
+    """NumPy implementation of TinyLidarNetDualBEV (Pattern C)."""
+
+    def __init__(
+        self,
+        input_dim: int = 1080,
+        state_dim: int = 13,
+        local_bev_size: int = 64,
+        local_bev_channels: int = 2,
+        global_bev_size: int = 128,
+        global_bev_channels: int = 3,
+        output_dim: int = 2
+    ):
+        self.input_dim = input_dim
+        self.state_dim = state_dim
+        self.local_bev_size = local_bev_size
+        self.local_bev_channels = local_bev_channels
+        self.global_bev_size = global_bev_size
+        self.global_bev_channels = global_bev_channels
+        self.output_dim = output_dim
+        self.params = {}
+
+        # LiDAR branch
+        self.lidar_strides = {'conv1': 4, 'conv2': 4, 'conv3': 2, 'conv4': 1, 'conv5': 1}
+        
+        self.shapes = {
+            'lidar_conv1_weight': (24, 1, 10),  'lidar_conv1_bias': (24,),
+            'lidar_conv2_weight': (36, 24, 8),  'lidar_conv2_bias': (36,),
+            'lidar_conv3_weight': (48, 36, 4),  'lidar_conv3_bias': (48,),
+            'lidar_conv4_weight': (64, 48, 3),  'lidar_conv4_bias': (64,),
+            'lidar_conv5_weight': (64, 64, 3),  'lidar_conv5_bias': (64,),
+        }
+
+        # Local BEV branch
+        self.shapes.update({
+            'local_bev_conv1_weight': (16, local_bev_channels, 3, 3), 'local_bev_conv1_bias': (16,),
+            'local_bev_conv2_weight': (32, 16, 3, 3), 'local_bev_conv2_bias': (32,),
+            'local_bev_conv3_weight': (64, 32, 3, 3), 'local_bev_conv3_bias': (64,),
+        })
+
+        # Global BEV branch
+        self.shapes.update({
+            'global_bev_conv1_weight': (16, global_bev_channels, 3, 3), 'global_bev_conv1_bias': (16,),
+            'global_bev_conv2_weight': (32, 16, 3, 3), 'global_bev_conv2_bias': (32,),
+            'global_bev_conv3_weight': (64, 32, 3, 3), 'global_bev_conv3_bias': (64,),
+            'global_bev_conv4_weight': (64, 64, 3, 3), 'global_bev_conv4_bias': (64,),
+        })
+
+        lidar_flatten_dim = self._get_lidar_output_dim()
+        local_bev_flatten_dim = self._get_local_bev_output_dim()
+        global_bev_flatten_dim = self._get_global_bev_output_dim()
+        
+        self.shapes.update({
+            'local_bev_fc_weight': (256, local_bev_flatten_dim), 'local_bev_fc_bias': (256,),
+            'global_bev_fc_weight': (256, global_bev_flatten_dim), 'global_bev_fc_bias': (256,),
+            'state_fc_weight': (64, state_dim), 'state_fc_bias': (64,),
+        })
+
+        # Larger fusion head for dual BEV
+        fusion_dim = lidar_flatten_dim + 256 + 256 + 64
+        self.shapes.update({
+            'fc1_weight': (256, fusion_dim), 'fc1_bias': (256,),
+            'fc2_weight': (64, 256), 'fc2_bias': (64,),
+            'fc3_weight': (10, 64), 'fc3_bias': (10,),
+            'fc4_weight': (output_dim, 10), 'fc4_bias': (output_dim,),
+        })
+
+        self._initialize_weights()
+
+    def _get_lidar_output_dim(self) -> int:
+        l = self.input_dim
+        for k, s in zip([10, 8, 4, 3, 3], [4, 4, 2, 1, 1]):
+            l = (l - k) // s + 1
+        return 64 * l
+
+    def _get_local_bev_output_dim(self) -> int:
+        h = w = self.local_bev_size
+        for _ in range(3):
+            h = (h + 2 - 3) // 2 + 1
+            w = (w + 2 - 3) // 2 + 1
+        return 64 * h * w
+
+    def _get_global_bev_output_dim(self) -> int:
+        h = w = self.global_bev_size
+        for _ in range(4):
+            h = (h + 2 - 3) // 2 + 1
+            w = (w + 2 - 3) // 2 + 1
+        return 64 * h * w
+
+    def _initialize_weights(self):
+        for name, shape in self.shapes.items():
+            if name.endswith('_weight'):
+                if 'conv' in name:
+                    fan_out = shape[0] * (shape[2] * shape[3] if len(shape) == 4 else shape[2])
+                else:
+                    fan_out = shape[0]
+                self.params[name] = kaiming_normal_init(shape, fan_out)
+            elif name.endswith('_bias'):
+                self.params[name] = zeros_init(shape)
+
+    def _conv2d_padded(self, x, weight, bias, stride, padding):
+        import numpy as np
+        if padding > 0:
+            x = np.pad(x, ((0, 0), (0, 0), (padding, padding), (padding, padding)), 
+                      mode='constant', constant_values=0)
+        return conv2d(x, weight, bias, stride=(stride, stride))
+
+    def __call__(self, lidar, local_bev, global_bev, state):
+        import numpy as np
+        
+        # LiDAR branch
+        x = relu(conv1d(lidar, self.params['lidar_conv1_weight'], 
+                       self.params['lidar_conv1_bias'], self.lidar_strides['conv1']))
+        x = relu(conv1d(x, self.params['lidar_conv2_weight'], 
+                       self.params['lidar_conv2_bias'], self.lidar_strides['conv2']))
+        x = relu(conv1d(x, self.params['lidar_conv3_weight'], 
+                       self.params['lidar_conv3_bias'], self.lidar_strides['conv3']))
+        x = relu(conv1d(x, self.params['lidar_conv4_weight'], 
+                       self.params['lidar_conv4_bias'], self.lidar_strides['conv4']))
+        x = relu(conv1d(x, self.params['lidar_conv5_weight'], 
+                       self.params['lidar_conv5_bias'], self.lidar_strides['conv5']))
+        lidar_features = flatten(x)
+        
+        # Local BEV branch
+        x_local = relu(self._conv2d_padded(local_bev, self.params['local_bev_conv1_weight'],
+                                           self.params['local_bev_conv1_bias'], stride=2, padding=1))
+        x_local = relu(self._conv2d_padded(x_local, self.params['local_bev_conv2_weight'],
+                                           self.params['local_bev_conv2_bias'], stride=2, padding=1))
+        x_local = relu(self._conv2d_padded(x_local, self.params['local_bev_conv3_weight'],
+                                           self.params['local_bev_conv3_bias'], stride=2, padding=1))
+        x_local = flatten(x_local)
+        local_bev_features = relu(linear(x_local, self.params['local_bev_fc_weight'], 
+                                         self.params['local_bev_fc_bias']))
+        
+        # Global BEV branch
+        x_global = relu(self._conv2d_padded(global_bev, self.params['global_bev_conv1_weight'],
+                                            self.params['global_bev_conv1_bias'], stride=2, padding=1))
+        x_global = relu(self._conv2d_padded(x_global, self.params['global_bev_conv2_weight'],
+                                            self.params['global_bev_conv2_bias'], stride=2, padding=1))
+        x_global = relu(self._conv2d_padded(x_global, self.params['global_bev_conv3_weight'],
+                                            self.params['global_bev_conv3_bias'], stride=2, padding=1))
+        x_global = relu(self._conv2d_padded(x_global, self.params['global_bev_conv4_weight'],
+                                            self.params['global_bev_conv4_bias'], stride=2, padding=1))
+        x_global = flatten(x_global)
+        global_bev_features = relu(linear(x_global, self.params['global_bev_fc_weight'], 
+                                          self.params['global_bev_fc_bias']))
+        
+        # State branch
+        state_features = relu(linear(state, self.params['state_fc_weight'], 
+                                     self.params['state_fc_bias']))
+        
+        # Fusion (all four branches)
+        fused = np.concatenate([lidar_features, local_bev_features, global_bev_features, state_features], axis=1)
+        
+        x = relu(linear(fused, self.params['fc1_weight'], self.params['fc1_bias']))
+        x = relu(linear(x, self.params['fc2_weight'], self.params['fc2_bias']))
+        x = relu(linear(x, self.params['fc3_weight'], self.params['fc3_bias']))
+        return tanh(linear(x, self.params['fc4_weight'], self.params['fc4_bias']))

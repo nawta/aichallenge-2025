@@ -3,6 +3,7 @@ import time
 import numpy as np
 import threading
 from collections import deque
+from typing import Optional, Tuple
 
 import rclpy
 from rclpy.node import Node
@@ -12,9 +13,14 @@ from nav_msgs.msg import Odometry
 from autoware_auto_control_msgs.msg import AckermannControlCommand
 
 from tiny_lidar_net_controller_core import TinyLidarNetCore
+from map_loader import load_lane_boundaries, LaneBoundaries
+from bev_generator import BEVGenerator, quaternion_to_yaw
 
 # Temporal model architectures that require sequence processing
 TEMPORAL_ARCHITECTURES = ['stacked', 'bilstm', 'tcn']
+
+# BEV-enabled model architectures
+BEV_ARCHITECTURES = ['local_bev', 'global_bev', 'dual_bev']
 
 
 class TinyLidarNetNode(Node):
@@ -27,6 +33,7 @@ class TinyLidarNetNode(Node):
     - large, small, deep: Single-frame models
     - fusion: Single-frame with odometry
     - stacked, bilstm, tcn: Temporal models with sequence processing
+    - local_bev, global_bev, dual_bev: BEV-enabled models with map data
     """
 
     def __init__(self):
@@ -45,6 +52,15 @@ class TinyLidarNetNode(Node):
         self.declare_parameter('acceleration', 0.1)
         self.declare_parameter('control_mode', 'ai')
         self.declare_parameter('debug', False)
+        
+        # BEV parameters
+        self.declare_parameter('bev.map_path', '')
+        self.declare_parameter('bev.local_size', 64)
+        self.declare_parameter('bev.local_resolution', 1.0)
+        self.declare_parameter('bev.local_channels', 2)
+        self.declare_parameter('bev.global_size', 128)
+        self.declare_parameter('bev.global_resolution', 1.5)
+        self.declare_parameter('bev.global_channels', 3)
 
         # --- Initialization ---
         input_dim = self.get_parameter('model.input_dim').value
@@ -61,14 +77,59 @@ class TinyLidarNetNode(Node):
         self.debug = self.get_parameter('debug').value
         self.log_interval = self.get_parameter('log_interval_sec').value
         
+        # BEV parameters
+        map_path = self.get_parameter('bev.map_path').value
+        local_bev_size = self.get_parameter('bev.local_size').value
+        local_bev_resolution = self.get_parameter('bev.local_resolution').value
+        local_bev_channels = self.get_parameter('bev.local_channels').value
+        global_bev_size = self.get_parameter('bev.global_size').value
+        global_bev_resolution = self.get_parameter('bev.global_resolution').value
+        global_bev_channels = self.get_parameter('bev.global_channels').value
+        
         # Check architecture type
         arch_lower = architecture.lower()
         self.use_fusion = arch_lower == 'fusion'
         self.is_temporal = arch_lower in TEMPORAL_ARCHITECTURES
+        self.is_bev = arch_lower in BEV_ARCHITECTURES
         self.seq_len = seq_len if self.is_temporal else 1
         
-        # Temporal models and fusion require odom
-        self.needs_odom = self.use_fusion or self.is_temporal
+        # BEV and temporal/fusion models require odom
+        self.needs_odom = self.use_fusion or self.is_temporal or self.is_bev
+        
+        # Initialize BEV components if needed
+        self.bev_generator: Optional[BEVGenerator] = None
+        self.lane_data: Optional[LaneBoundaries] = None
+        self.map_offset: Optional[Tuple[float, float]] = None
+        
+        if self.is_bev:
+            if not map_path:
+                self.get_logger().error("BEV architecture requires 'bev.map_path' parameter")
+                raise ValueError("Missing bev.map_path for BEV architecture")
+            
+            try:
+                # Load lane boundaries
+                self.lane_data = load_lane_boundaries(map_path, auto_offset=True)
+                self.map_offset = self.lane_data.offset
+                self.get_logger().info(f"Loaded lane data from {map_path}, offset: {self.map_offset}")
+                
+                # Initialize BEV generator
+                self.bev_generator = BEVGenerator(
+                    local_grid_size=local_bev_size,
+                    local_resolution=local_bev_resolution,
+                    global_grid_size=global_bev_size,
+                    global_resolution=global_bev_resolution,
+                    local_channels=local_bev_channels,
+                    global_channels=global_bev_channels
+                )
+                # Auto-compute map center for global BEV
+                self.bev_generator.auto_compute_map_center(self.lane_data)
+                self.get_logger().info(
+                    f"BEV generator initialized. Local: {local_bev_size}x{local_bev_size}@{local_bev_resolution}m, "
+                    f"Global: {global_bev_size}x{global_bev_size}@{global_bev_resolution}m"
+                )
+            except Exception as e:
+                self.get_logger().error(f"Failed to initialize BEV components: {e}")
+                raise e
 
         try:
             self.core = TinyLidarNetCore(
@@ -81,11 +142,15 @@ class TinyLidarNetNode(Node):
                 ckpt_path=ckpt_path,
                 acceleration=acceleration,
                 control_mode=control_mode,
-                max_range=max_range
+                max_range=max_range,
+                local_bev_size=local_bev_size,
+                local_bev_channels=local_bev_channels,
+                global_bev_size=global_bev_size,
+                global_bev_channels=global_bev_channels
             )
             self.get_logger().info(
                 f"Core initialized. Arch: {architecture}, MaxRange: {max_range}, "
-                f"SeqLen: {self.seq_len}, Temporal: {self.is_temporal}"
+                f"SeqLen: {self.seq_len}, Temporal: {self.is_temporal}, BEV: {self.is_bev}"
             )
         except Exception as e:
             self.get_logger().error(f"Failed to initialize core logic: {e}")
@@ -98,6 +163,7 @@ class TinyLidarNetNode(Node):
         # Thread-safe storage for latest odometry data
         self._odom_lock = threading.Lock()
         self._latest_odom = None
+        self._latest_pose = None  # For BEV: (x, y, yaw)
         
         # Frame buffers for temporal models
         if self.is_temporal:
@@ -117,7 +183,7 @@ class TinyLidarNetNode(Node):
             AckermannControlCommand, "/awsim/control_cmd", 1
         )
         
-        # Subscribe to kinematic_state if needed (fusion or temporal)
+        # Subscribe to kinematic_state if needed (fusion, temporal, or BEV)
         if self.needs_odom:
             self.sub_odom = self.create_subscription(
                 Odometry, "/localization/kinematic_state", self.odom_callback, qos
@@ -129,7 +195,7 @@ class TinyLidarNetNode(Node):
     def odom_callback(self, msg: Odometry):
         """Callback for Odometry subscription.
 
-        Stores the latest kinematic state for fusion model.
+        Stores the latest kinematic state for fusion/BEV models.
 
         Args:
             msg (Odometry): The incoming ROS 2 Odometry message.
@@ -155,8 +221,19 @@ class TinyLidarNetNode(Node):
             msg.twist.twist.angular.z,
         ], dtype=np.float32)
         
+        # Extract pose for BEV generation
+        ego_x = msg.pose.pose.position.x
+        ego_y = msg.pose.pose.position.y
+        ego_yaw = quaternion_to_yaw(
+            msg.pose.pose.orientation.x,
+            msg.pose.pose.orientation.y,
+            msg.pose.pose.orientation.z,
+            msg.pose.pose.orientation.w
+        )
+        
         with self._odom_lock:
             self._latest_odom = odom_features
+            self._latest_pose = (ego_x, ego_y, ego_yaw)
 
     def scan_callback(self, msg: LaserScan):
         """Callback for LaserScan subscription.
@@ -173,7 +250,36 @@ class TinyLidarNetNode(Node):
         ranges = np.array(msg.ranges, dtype=np.float32)
 
         # 2. Process via Core Logic
-        if self.is_temporal:
+        if self.is_bev:
+            # BEV models: generate BEV grids from map + pose
+            with self._odom_lock:
+                odom = self._latest_odom if self._latest_odom is not None else np.zeros(13, dtype=np.float32)
+                pose = self._latest_pose
+            
+            if pose is None:
+                if self.debug:
+                    self.get_logger().warn("No pose data available for BEV, waiting...", throttle_duration_sec=5.0)
+                return
+            
+            ego_x, ego_y, ego_yaw = pose
+            
+            # Generate BEV grids based on architecture
+            local_bev = None
+            global_bev = None
+            
+            if self.core.architecture in ['local_bev', 'dual_bev']:
+                local_bev = self.bev_generator.generate_local(
+                    self.lane_data, ego_x, ego_y, ego_yaw, self.map_offset
+                )
+            
+            if self.core.architecture in ['global_bev', 'dual_bev']:
+                global_bev = self.bev_generator.generate_global(
+                    self.lane_data, ego_x, ego_y, self.map_offset
+                )
+            
+            accel, steer = self.core.process_with_bev(ranges, local_bev, global_bev, odom)
+            
+        elif self.is_temporal:
             # Temporal models: use frame buffers
             # Get latest odometry data (thread-safe)
             with self._odom_lock:

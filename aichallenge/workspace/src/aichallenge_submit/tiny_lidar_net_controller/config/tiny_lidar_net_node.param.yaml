@@ -3,7 +3,7 @@
     log_interval_sec: 5.0        # 推論統計ログを出す間隔（秒）
     
     model:
-      input_dim: 750            # LiDARスキャンの入力次元
+      input_dim: 750             # LiDARスキャンの入力次元
       output_dim: 2              # 出力（steering, throttleなど）
       state_dim: 13              # kinematic state の次元
       seq_len: 10                # シーケンス長（時系列モデル用）
@@ -12,11 +12,28 @@
       # "large", "small", "deep" - 単一フレームモデル
       # "fusion" - 単一フレーム + odometry
       # "stacked", "bilstm", "tcn" - 時系列モデル
+      # "local_bev", "global_bev", "dual_bev" - BEVマップ統合モデル
       architecture: "large"
       ckpt_path: "/path/to/tinylidarnet_weights.npy"
 
     max_range: 30.0              # LiDARの最大レンジ（メートル）
-    control_mode: "fixed"          # "ai" または "fixed"
+    control_mode: "fixed"        # "ai" または "fixed"
     acceleration: 0.3            # 固定加速度コマンド mode:fixed の場合に使用
+
+    # BEV (Bird's Eye View) パラメータ
+    # architecture が "local_bev", "global_bev", "dual_bev" の場合に必要
+    bev:
+      # lane.csv のパス（Lanelet2マップから生成された境界線データ）
+      map_path: ""
+      
+      # Local BEV 設定（車両中心、yaw回転あり）
+      local_size: 64             # グリッドサイズ（64x64）
+      local_resolution: 1.0      # メートル/ピクセル（64m x 64m カバー範囲）
+      local_channels: 2          # チャンネル数（0: 左境界, 1: 右境界）
+      
+      # Global BEV 設定（マップ固定座標、回転なし）
+      global_size: 128           # グリッドサイズ（128x128）
+      global_resolution: 1.5     # メートル/ピクセル（192m x 192m カバー範囲）
+      global_channels: 3         # チャンネル数（0: 左境界, 1: 右境界, 2: 自車位置）
 
     debug: false

@@ -4,7 +4,8 @@ from typing import Optional, Tuple, Union
 
 from model.tinylidarnet import (
     TinyLidarNetNp, TinyLidarNetSmallNp, TinyLidarNetDeepNp, TinyLidarNetFusionNp,
-    TinyLidarNetStackedNp, TinyLidarNetBiLSTMNp, TinyLidarNetTCNNp
+    TinyLidarNetStackedNp, TinyLidarNetBiLSTMNp, TinyLidarNetTCNNp,
+    TinyLidarNetLocalBEVNp, TinyLidarNetGlobalBEVNp, TinyLidarNetDualBEVNp
 )
 
 
@@ -19,6 +20,9 @@ ODOM_NORM_CONSTANTS = {
 # Temporal model architectures
 TEMPORAL_ARCHITECTURES = ['stacked', 'bilstm', 'tcn']
 
+# BEV-enabled model architectures
+BEV_ARCHITECTURES = ['local_bev', 'global_bev', 'dual_bev']
+
 
 class TinyLidarNetCore:
     """Core logic for the TinyLidarNet autonomous driving controller.
@@ -30,6 +34,7 @@ class TinyLidarNetCore:
     Supports multiple architectures:
     - Single-frame: large, small, deep, fusion
     - Temporal: stacked, bilstm, tcn
+    - BEV-enabled: local_bev, global_bev, dual_bev
 
     Attributes:
         input_dim (int): Dimension of the input vector expected by the model.
@@ -43,6 +48,7 @@ class TinyLidarNetCore:
         max_range (float): Maximum LiDAR range used for normalization and clipping.
         use_fusion (bool): Whether the model uses kinematic state fusion.
         is_temporal (bool): Whether the model is a temporal model.
+        is_bev (bool): Whether the model uses BEV map inputs.
         model (object): The instantiated neural network model.
         logger (logging.Logger): Logger instance.
     """
@@ -58,7 +64,11 @@ class TinyLidarNetCore:
         ckpt_path: str = '',
         acceleration: float = 0.1,
         control_mode: str = 'ai',
-        max_range: float = 30.0
+        max_range: float = 30.0,
+        local_bev_size: int = 64,
+        local_bev_channels: int = 2,
+        global_bev_size: int = 128,
+        global_bev_channels: int = 3
     ):
         """Initializes the TinyLidarNetCore with specified parameters.
 
@@ -74,7 +84,8 @@ class TinyLidarNetCore:
             hidden_size (int, optional): Hidden size for temporal models.
                 Defaults to 128.
             architecture (str, optional): The model architecture to use.
-                Options: 'large', 'small', 'deep', 'fusion', 'stacked', 'bilstm', 'tcn'.
+                Options: 'large', 'small', 'deep', 'fusion', 'stacked', 'bilstm', 'tcn',
+                         'local_bev', 'global_bev', 'dual_bev'.
                 Defaults to 'large'.
             ckpt_path (str, optional): Path to the numpy weight file (.npy or .npz).
                 Defaults to ''.
@@ -87,6 +98,10 @@ class TinyLidarNetCore:
             max_range (float, optional): The maximum range value for normalization.
                 Values exceeding this will be clipped, and infinity will be replaced
                 by this value. Defaults to 30.0.
+            local_bev_size (int, optional): Size of local BEV grid. Defaults to 64.
+            local_bev_channels (int, optional): Number of local BEV channels. Defaults to 2.
+            global_bev_size (int, optional): Size of global BEV grid. Defaults to 128.
+            global_bev_channels (int, optional): Number of global BEV channels. Defaults to 3.
         """
         self.input_dim = input_dim
         self.output_dim = output_dim
@@ -97,8 +112,14 @@ class TinyLidarNetCore:
         self.acceleration = acceleration
         self.control_mode = control_mode.lower()
         self.max_range = max_range
+        self.local_bev_size = local_bev_size
+        self.local_bev_channels = local_bev_channels
+        self.global_bev_size = global_bev_size
+        self.global_bev_channels = global_bev_channels
+        
         self.use_fusion = self.architecture == 'fusion'
         self.is_temporal = self.architecture in TEMPORAL_ARCHITECTURES
+        self.is_bev = self.architecture in BEV_ARCHITECTURES
         self.logger = logging.getLogger(__name__)
 
         # Initialize model based on architecture
@@ -131,6 +152,32 @@ class TinyLidarNetCore:
                 input_dim=self.input_dim,
                 state_dim=self.state_dim,
                 hidden_size=self.hidden_size,
+                output_dim=self.output_dim
+            )
+        elif self.architecture == 'local_bev':
+            self.model = TinyLidarNetLocalBEVNp(
+                input_dim=self.input_dim,
+                state_dim=self.state_dim,
+                local_bev_size=self.local_bev_size,
+                local_bev_channels=self.local_bev_channels,
+                output_dim=self.output_dim
+            )
+        elif self.architecture == 'global_bev':
+            self.model = TinyLidarNetGlobalBEVNp(
+                input_dim=self.input_dim,
+                state_dim=self.state_dim,
+                global_bev_size=self.global_bev_size,
+                global_bev_channels=self.global_bev_channels,
+                output_dim=self.output_dim
+            )
+        elif self.architecture == 'dual_bev':
+            self.model = TinyLidarNetDualBEVNp(
+                input_dim=self.input_dim,
+                state_dim=self.state_dim,
+                local_bev_size=self.local_bev_size,
+                local_bev_channels=self.local_bev_channels,
+                global_bev_size=self.global_bev_size,
+                global_bev_channels=self.global_bev_channels,
                 output_dim=self.output_dim
             )
         else:
@@ -248,6 +295,165 @@ class TinyLidarNetCore:
         """Resets the temporal state for BiLSTM model."""
         if self.architecture == 'bilstm' and hasattr(self.model, 'reset_state'):
             self.model.reset_state()
+
+    def process_with_local_bev(
+        self,
+        ranges: np.ndarray,
+        local_bev: np.ndarray,
+        odom: Optional[np.ndarray] = None
+    ) -> Tuple[float, float]:
+        """Runs inference with LiDAR, local BEV, and kinematic state (Pattern A).
+
+        Args:
+            ranges (np.ndarray): Raw LiDAR range data (1D array).
+            local_bev (np.ndarray): Local BEV grid, shape (local_bev_channels, H, W).
+            odom (np.ndarray, optional): Kinematic state features (13,).
+
+        Returns:
+            Tuple[float, float]: (acceleration, steering_angle).
+        """
+        if self.architecture != 'local_bev':
+            raise ValueError("process_with_local_bev() requires 'local_bev' architecture")
+        
+        # Preprocess LiDAR
+        processed_ranges = self._preprocess_ranges(ranges)
+        x = np.expand_dims(np.expand_dims(processed_ranges, axis=0), axis=1)  # (1, 1, input_dim)
+        
+        # Prepare local BEV tensor: (1, channels, H, W)
+        local_bev_batch = np.expand_dims(local_bev.astype(np.float32), axis=0)
+        
+        # Process odometry
+        if odom is None:
+            odom = np.zeros(self.state_dim, dtype=np.float32)
+        processed_odom = self._preprocess_odom(odom)
+        state = np.expand_dims(processed_odom, axis=0)  # (1, state_dim)
+        
+        # Inference
+        outputs = self.model(x, local_bev_batch, state)[0]
+        
+        # Post-process
+        accel = float(np.clip(outputs[0], -1.0, 1.0)) if self.control_mode == "ai" else self.acceleration
+        steer = float(np.clip(outputs[1], -1.0, 1.0))
+        
+        return accel, steer
+
+    def process_with_global_bev(
+        self,
+        ranges: np.ndarray,
+        global_bev: np.ndarray,
+        odom: Optional[np.ndarray] = None
+    ) -> Tuple[float, float]:
+        """Runs inference with LiDAR, global BEV, and kinematic state (Pattern B).
+
+        Args:
+            ranges (np.ndarray): Raw LiDAR range data (1D array).
+            global_bev (np.ndarray): Global BEV grid, shape (global_bev_channels, H, W).
+            odom (np.ndarray, optional): Kinematic state features (13,).
+
+        Returns:
+            Tuple[float, float]: (acceleration, steering_angle).
+        """
+        if self.architecture != 'global_bev':
+            raise ValueError("process_with_global_bev() requires 'global_bev' architecture")
+        
+        # Preprocess LiDAR
+        processed_ranges = self._preprocess_ranges(ranges)
+        x = np.expand_dims(np.expand_dims(processed_ranges, axis=0), axis=1)
+        
+        # Prepare global BEV tensor: (1, channels, H, W)
+        global_bev_batch = np.expand_dims(global_bev.astype(np.float32), axis=0)
+        
+        # Process odometry
+        if odom is None:
+            odom = np.zeros(self.state_dim, dtype=np.float32)
+        processed_odom = self._preprocess_odom(odom)
+        state = np.expand_dims(processed_odom, axis=0)
+        
+        # Inference
+        outputs = self.model(x, global_bev_batch, state)[0]
+        
+        # Post-process
+        accel = float(np.clip(outputs[0], -1.0, 1.0)) if self.control_mode == "ai" else self.acceleration
+        steer = float(np.clip(outputs[1], -1.0, 1.0))
+        
+        return accel, steer
+
+    def process_with_dual_bev(
+        self,
+        ranges: np.ndarray,
+        local_bev: np.ndarray,
+        global_bev: np.ndarray,
+        odom: Optional[np.ndarray] = None
+    ) -> Tuple[float, float]:
+        """Runs inference with LiDAR, both BEVs, and kinematic state (Pattern C).
+
+        Args:
+            ranges (np.ndarray): Raw LiDAR range data (1D array).
+            local_bev (np.ndarray): Local BEV grid, shape (local_bev_channels, H, W).
+            global_bev (np.ndarray): Global BEV grid, shape (global_bev_channels, H, W).
+            odom (np.ndarray, optional): Kinematic state features (13,).
+
+        Returns:
+            Tuple[float, float]: (acceleration, steering_angle).
+        """
+        if self.architecture != 'dual_bev':
+            raise ValueError("process_with_dual_bev() requires 'dual_bev' architecture")
+        
+        # Preprocess LiDAR
+        processed_ranges = self._preprocess_ranges(ranges)
+        x = np.expand_dims(np.expand_dims(processed_ranges, axis=0), axis=1)
+        
+        # Prepare BEV tensors: (1, channels, H, W)
+        local_bev_batch = np.expand_dims(local_bev.astype(np.float32), axis=0)
+        global_bev_batch = np.expand_dims(global_bev.astype(np.float32), axis=0)
+        
+        # Process odometry
+        if odom is None:
+            odom = np.zeros(self.state_dim, dtype=np.float32)
+        processed_odom = self._preprocess_odom(odom)
+        state = np.expand_dims(processed_odom, axis=0)
+        
+        # Inference
+        outputs = self.model(x, local_bev_batch, global_bev_batch, state)[0]
+        
+        # Post-process
+        accel = float(np.clip(outputs[0], -1.0, 1.0)) if self.control_mode == "ai" else self.acceleration
+        steer = float(np.clip(outputs[1], -1.0, 1.0))
+        
+        return accel, steer
+
+    def process_with_bev(
+        self,
+        ranges: np.ndarray,
+        local_bev: Optional[np.ndarray] = None,
+        global_bev: Optional[np.ndarray] = None,
+        odom: Optional[np.ndarray] = None
+    ) -> Tuple[float, float]:
+        """Unified BEV processing method that routes to the appropriate processor.
+
+        Args:
+            ranges (np.ndarray): Raw LiDAR range data.
+            local_bev (np.ndarray, optional): Local BEV grid.
+            global_bev (np.ndarray, optional): Global BEV grid.
+            odom (np.ndarray, optional): Kinematic state features.
+
+        Returns:
+            Tuple[float, float]: (acceleration, steering_angle).
+        """
+        if self.architecture == 'local_bev':
+            if local_bev is None:
+                raise ValueError("local_bev is required for 'local_bev' architecture")
+            return self.process_with_local_bev(ranges, local_bev, odom)
+        elif self.architecture == 'global_bev':
+            if global_bev is None:
+                raise ValueError("global_bev is required for 'global_bev' architecture")
+            return self.process_with_global_bev(ranges, global_bev, odom)
+        elif self.architecture == 'dual_bev':
+            if local_bev is None or global_bev is None:
+                raise ValueError("Both local_bev and global_bev are required for 'dual_bev' architecture")
+            return self.process_with_dual_bev(ranges, local_bev, global_bev, odom)
+        else:
+            raise ValueError(f"process_with_bev() requires a BEV architecture, got '{self.architecture}'")
 
     def _load_weights(self, path: str) -> None:
         """Loads model weights from a file into the model parameters.
