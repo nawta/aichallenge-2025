@@ -48,7 +48,7 @@ def save_numpy_dict(params: Dict[str, np.ndarray], output_path: Path) -> None:
 def load_model(
     model_name: str, input_dim: int, output_dim: int, ckpt_path: Path,
     state_dim: int = 13, seq_len: int = 10, hidden_size: int = 128,
-    map_feature_dim: int = 128
+    map_feature_dim: int = 128, tcn_causal: bool = False
 ) -> torch.nn.Module:
     """Initializes the model architecture and loads weights from a checkpoint.
 
@@ -61,6 +61,7 @@ def load_model(
         seq_len: Sequence length for temporal models (default: 10).
         hidden_size: Hidden size for temporal models (default: 128).
         map_feature_dim: Map feature dimension for map models (default: 128).
+        tcn_causal: Whether to use causal TCN (default: False for training).
 
     Returns:
         The PyTorch model instance with loaded weights.
@@ -100,6 +101,7 @@ def load_model(
             input_dim=input_dim,
             state_dim=state_dim,
             hidden_size=hidden_size,
+            causal=tcn_causal,
             output_dim=output_dim
         )
     elif model_name == "tinylidarnet_map":
@@ -123,7 +125,7 @@ def load_model(
 def convert_checkpoint(
     model_name: str, input_dim: int, output_dim: int, ckpt: Path, output: Path,
     state_dim: int = 13, seq_len: int = 10, hidden_size: int = 128,
-    map_feature_dim: int = 128
+    map_feature_dim: int = 128, tcn_causal: bool = False
 ) -> None:
     """Orchestrates the model conversion process.
 
@@ -140,12 +142,13 @@ def convert_checkpoint(
         seq_len: Sequence length for temporal models.
         hidden_size: Hidden size for temporal models.
         map_feature_dim: Map feature dimension for map models.
+        tcn_causal: Whether to use causal TCN.
     """
     # 1. Load Model (I/O & Logic)
     model = load_model(
-        model_name, input_dim, output_dim, ckpt, 
+        model_name, input_dim, output_dim, ckpt,
         state_dim=state_dim, seq_len=seq_len, hidden_size=hidden_size,
-        map_feature_dim=map_feature_dim
+        map_feature_dim=map_feature_dim, tcn_causal=tcn_causal
     )
     
     # 2. Extract Parameters (Pure Logic) -> Easy to Unit Test
@@ -177,6 +180,7 @@ def main() -> None:
     parser.add_argument("--seq-len", type=int, default=10, help="Sequence length (for temporal models)")
     parser.add_argument("--hidden-size", type=int, default=128, help="Hidden size (for temporal models)")
     parser.add_argument("--map-feature-dim", type=int, default=128, help="Map feature dimension (for map model)")
+    parser.add_argument("--tcn-causal", action="store_true", default=False, help="Use causal TCN (for inference)")
     parser.add_argument("--ckpt", type=Path, required=True, help="Source .pth checkpoint")
     parser.add_argument("--output", type=Path, default=Path("./weights/converted_weights.npy"), help="Destination .npy path")
 
@@ -185,7 +189,7 @@ def main() -> None:
     convert_checkpoint(
         args.model, args.input_dim, args.output_dim, args.ckpt, args.output,
         state_dim=args.state_dim, seq_len=args.seq_len, hidden_size=args.hidden_size,
-        map_feature_dim=args.map_feature_dim
+        map_feature_dim=args.map_feature_dim, tcn_causal=args.tcn_causal
     )
 
 
