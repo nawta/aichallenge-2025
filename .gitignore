@@ -9,3 +9,7 @@ rosbag2*/
 *pem
 vehicle/.env
 metadata.yaml
+
+# Large dataset files
+*.mcap.zstd
+aichallenge/dataset/
