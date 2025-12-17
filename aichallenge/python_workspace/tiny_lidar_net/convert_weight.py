@@ -6,7 +6,8 @@ import torch
 
 from lib.model import (
     TinyLidarNet, TinyLidarNetSmall, TinyLidarNetDeep, TinyLidarNetFusion,
-    TinyLidarNetStacked, TinyLidarNetBiLSTM, TinyLidarNetTCN, TinyLidarNetMap
+    TinyLidarNetStacked, TinyLidarNetBiLSTM, TinyLidarNetTCN, TinyLidarNetMap,
+    TinyLidarNetLocalBEV, TinyLidarNetGlobalBEV, TinyLidarNetDualBEV
 )
 
 
@@ -48,7 +49,8 @@ def save_numpy_dict(params: Dict[str, np.ndarray], output_path: Path) -> None:
 def load_model(
     model_name: str, input_dim: int, output_dim: int, ckpt_path: Path,
     state_dim: int = 13, seq_len: int = 10, hidden_size: int = 128,
-    map_feature_dim: int = 128, tcn_causal: bool = False
+    map_feature_dim: int = 128, tcn_causal: bool = False,
+    local_grid_size: int = 64, global_grid_size: int = 128
 ) -> torch.nn.Module:
     """Initializes the model architecture and loads weights from a checkpoint.
 
@@ -62,6 +64,8 @@ def load_model(
         hidden_size: Hidden size for temporal models (default: 128).
         map_feature_dim: Map feature dimension for map models (default: 128).
         tcn_causal: Whether to use causal TCN (default: False for training).
+        local_grid_size: Local BEV grid size for BEV models (default: 64).
+        global_grid_size: Global BEV grid size for BEV models (default: 128).
 
     Returns:
         The PyTorch model instance with loaded weights.
@@ -110,6 +114,32 @@ def load_model(
             map_feature_dim=map_feature_dim,
             output_dim=output_dim
         )
+    elif model_name == "tinylidarnet_local_bev":
+        model = TinyLidarNetLocalBEV(
+            input_dim=input_dim,
+            local_grid_size=local_grid_size,
+            local_channels=2,
+            state_dim=state_dim,
+            output_dim=output_dim
+        )
+    elif model_name == "tinylidarnet_global_bev":
+        model = TinyLidarNetGlobalBEV(
+            input_dim=input_dim,
+            global_grid_size=global_grid_size,
+            global_channels=3,
+            state_dim=state_dim,
+            output_dim=output_dim
+        )
+    elif model_name == "tinylidarnet_dual_bev":
+        model = TinyLidarNetDualBEV(
+            input_dim=input_dim,
+            local_grid_size=local_grid_size,
+            local_channels=2,
+            global_grid_size=global_grid_size,
+            global_channels=3,
+            state_dim=state_dim,
+            output_dim=output_dim
+        )
     else:
         raise ValueError(f"Unknown model name: {model_name}")
 
@@ -125,7 +155,8 @@ def load_model(
 def convert_checkpoint(
     model_name: str, input_dim: int, output_dim: int, ckpt: Path, output: Path,
     state_dim: int = 13, seq_len: int = 10, hidden_size: int = 128,
-    map_feature_dim: int = 128, tcn_causal: bool = False
+    map_feature_dim: int = 128, tcn_causal: bool = False,
+    local_grid_size: int = 64, global_grid_size: int = 128
 ) -> None:
     """Orchestrates the model conversion process.
 
@@ -143,12 +174,15 @@ def convert_checkpoint(
         hidden_size: Hidden size for temporal models.
         map_feature_dim: Map feature dimension for map models.
         tcn_causal: Whether to use causal TCN.
+        local_grid_size: Local BEV grid size for BEV models.
+        global_grid_size: Global BEV grid size for BEV models.
     """
     # 1. Load Model (I/O & Logic)
     model = load_model(
         model_name, input_dim, output_dim, ckpt,
         state_dim=state_dim, seq_len=seq_len, hidden_size=hidden_size,
-        map_feature_dim=map_feature_dim, tcn_causal=tcn_causal
+        map_feature_dim=map_feature_dim, tcn_causal=tcn_causal,
+        local_grid_size=local_grid_size, global_grid_size=global_grid_size
     )
     
     # 2. Extract Parameters (Pure Logic) -> Easy to Unit Test
@@ -167,12 +201,13 @@ def main() -> None:
         description="Convert PyTorch weights to NumPy.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument("--model", type=str, 
+    parser.add_argument("--model", type=str,
                         choices=[
-                            "tinylidarnet", "tinylidarnet_small", "tinylidarnet_deep", 
-                            "tinylidarnet_fusion", "tinylidarnet_stacked", 
-                            "tinylidarnet_bilstm", "tinylidarnet_tcn", "tinylidarnet_map"
-                        ], 
+                            "tinylidarnet", "tinylidarnet_small", "tinylidarnet_deep",
+                            "tinylidarnet_fusion", "tinylidarnet_stacked",
+                            "tinylidarnet_bilstm", "tinylidarnet_tcn", "tinylidarnet_map",
+                            "tinylidarnet_local_bev", "tinylidarnet_global_bev", "tinylidarnet_dual_bev"
+                        ],
                         default="tinylidarnet", help="Model architecture")
     parser.add_argument("--input-dim", type=int, default=1080, help="Input dimension size")
     parser.add_argument("--output-dim", type=int, default=2, help="Output dimension size")
@@ -181,6 +216,8 @@ def main() -> None:
     parser.add_argument("--hidden-size", type=int, default=128, help="Hidden size (for temporal models)")
     parser.add_argument("--map-feature-dim", type=int, default=128, help="Map feature dimension (for map model)")
     parser.add_argument("--tcn-causal", action="store_true", default=False, help="Use causal TCN (for inference)")
+    parser.add_argument("--local-grid-size", type=int, default=64, help="Local BEV grid size (for BEV models)")
+    parser.add_argument("--global-grid-size", type=int, default=128, help="Global BEV grid size (for BEV models)")
     parser.add_argument("--ckpt", type=Path, required=True, help="Source .pth checkpoint")
     parser.add_argument("--output", type=Path, default=Path("./weights/converted_weights.npy"), help="Destination .npy path")
 
@@ -189,7 +226,8 @@ def main() -> None:
     convert_checkpoint(
         args.model, args.input_dim, args.output_dim, args.ckpt, args.output,
         state_dim=args.state_dim, seq_len=args.seq_len, hidden_size=args.hidden_size,
-        map_feature_dim=args.map_feature_dim, tcn_causal=args.tcn_causal
+        map_feature_dim=args.map_feature_dim, tcn_causal=args.tcn_causal,
+        local_grid_size=args.local_grid_size, global_grid_size=args.global_grid_size
     )
 
 

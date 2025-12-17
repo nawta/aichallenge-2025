@@ -83,6 +83,22 @@ MAP_IMAGES=(
     "/aichallenge/map_image/2.png"
 )
 
+# BEV models (require lane_csv_path)
+BEV_MODELS=(
+    "TinyLidarNetLocalBEV:tinylidarnet_local_bev"
+    "TinyLidarNetGlobalBEV:tinylidarnet_global_bev"
+    "TinyLidarNetDualBEV:tinylidarnet_dual_bev"
+)
+
+# Lane CSV path for BEV models
+LANE_CSV_PATH="/aichallenge/workspace/src/aichallenge_submit/laserscan_generator/map/lane.csv"
+
+# BEV parameters
+LOCAL_GRID_SIZE=64
+LOCAL_RESOLUTION=1.0
+GLOBAL_GRID_SIZE=128
+GLOBAL_RESOLUTION=1.5
+
 # =============================================================================
 # Training Function
 # =============================================================================
@@ -172,13 +188,15 @@ train_model() {
 TOTAL_SINGLE=$((${#SINGLE_FRAME_MODELS[@]} * 2))
 TOTAL_TEMPORAL=$((${#TEMPORAL_MODELS[@]} * 2))
 TOTAL_MAP=$((${#MAP_MODELS[@]} * ${#MAP_IMAGES[@]} * 2))
-TOTAL_RUNS=$((TOTAL_SINGLE + TOTAL_TEMPORAL + TOTAL_MAP))
+TOTAL_BEV=$((${#BEV_MODELS[@]} * 2))
+TOTAL_RUNS=$((TOTAL_SINGLE + TOTAL_TEMPORAL + TOTAL_MAP + TOTAL_BEV))
 
 echo ""
 echo "📋 Training Plan:"
 echo "   Single-frame models: ${#SINGLE_FRAME_MODELS[@]} × 2 (aug/noaug) = ${TOTAL_SINGLE}"
 echo "   Temporal models: ${#TEMPORAL_MODELS[@]} × 2 (aug/noaug) = ${TOTAL_TEMPORAL}"
 echo "   Map models: ${#MAP_MODELS[@]} × ${#MAP_IMAGES[@]} maps × 2 (aug/noaug) = ${TOTAL_MAP}"
+echo "   BEV models: ${#BEV_MODELS[@]} × 2 (aug/noaug) = ${TOTAL_BEV}"
 echo "   Total: ${TOTAL_RUNS} training runs"
 echo ""
 
@@ -272,6 +290,32 @@ for MAP_IMAGE in "${MAP_IMAGES[@]}"; do
         # Without augmentation
         train_model "${MODEL_NAME}" "${CONVERT_NAME}" "false" "${TRAIN_EXTRA}" "${CONVERT_EXTRA}" "${SAVE_SUFFIX}"
     done
+done
+
+# =============================================================================
+# Train BEV Models
+# =============================================================================
+
+echo ""
+echo "=========================================="
+echo "🔹 Training BEV Models"
+echo "=========================================="
+
+for MODEL_INFO in "${BEV_MODELS[@]}"; do
+    MODEL_NAME="${MODEL_INFO%%:*}"
+    CONVERT_NAME="${MODEL_INFO##*:}"
+
+    # Hydra overrides for train.py
+    TRAIN_EXTRA="model.lane_csv_path='${LANE_CSV_PATH}' model.local_grid_size=${LOCAL_GRID_SIZE} model.local_resolution=${LOCAL_RESOLUTION} model.global_grid_size=${GLOBAL_GRID_SIZE} model.global_resolution=${GLOBAL_RESOLUTION}"
+
+    # CLI args for convert_weight.py
+    CONVERT_EXTRA="--local-grid-size ${LOCAL_GRID_SIZE} --global-grid-size ${GLOBAL_GRID_SIZE}"
+
+    # With augmentation
+    train_model "${MODEL_NAME}" "${CONVERT_NAME}" "true" "${TRAIN_EXTRA}" "${CONVERT_EXTRA}"
+
+    # Without augmentation
+    train_model "${MODEL_NAME}" "${CONVERT_NAME}" "false" "${TRAIN_EXTRA}" "${CONVERT_EXTRA}"
 done
 
 # =============================================================================

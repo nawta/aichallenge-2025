@@ -1032,13 +1032,417 @@ class TinyLidarNetMap(nn.Module):
         
         # --- Late Fusion ---
         fused = torch.cat([lidar_features, map_features], dim=1)  # (Batch, 1920)
-        
+
         # --- Regression Head ---
         x = F.relu(self.fc1(fused))
         x = F.relu(self.fc2(x))
         x = F.relu(self.fc3(x))
-        
+
         # Output Layer
         x = torch.tanh(self.fc4(x))
-        
+
         return x
+
+
+# =============================================================================
+# BEV (Bird's Eye View) Models for Ablation Study
+# =============================================================================
+# These models integrate pre-scanned map information as BEV representations.
+# - Local BEV: Vehicle-centered, rotated to heading (64x64, 2 channels)
+# - Global BEV: Map-fixed coordinates (128x128, 3 channels)
+# - Dual BEV: Combines both local and global representations
+#
+# Related files:
+# - lib/bev_generator.py: BEV image generation from lane boundaries
+# - lib/map_loader.py: Lane boundary CSV loading
+# =============================================================================
+
+
+class TinyLidarNetLocalBEV(nn.Module):
+    """Pattern A: LiDAR + Local BEV + State fusion.
+
+    Local BEV characteristics:
+    - Vehicle-centered, rotated to vehicle heading
+    - 64x64 grid, 2 channels (left/right boundaries)
+    - Good for local perception and obstacle avoidance
+
+    Args:
+        input_dim: LiDAR scan dimension (default: 1080)
+        state_dim: Odometry state dimension (default: 13)
+        local_bev_size: Local BEV grid size (default: 64)
+        local_bev_channels: Number of BEV channels (default: 2)
+        output_dim: Output dimension (default: 2 for accel/steer)
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 1080,
+        state_dim: int = 13,
+        local_bev_size: int = 64,
+        local_bev_channels: int = 2,
+        output_dim: int = 2
+    ):
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.state_dim = state_dim
+        self.local_bev_size = local_bev_size
+        self.local_bev_channels = local_bev_channels
+
+        # --- LiDAR Branch ---
+        self.lidar_conv1 = nn.Conv1d(1, 24, kernel_size=10, stride=4)
+        self.lidar_conv2 = nn.Conv1d(24, 36, kernel_size=8, stride=4)
+        self.lidar_conv3 = nn.Conv1d(36, 48, kernel_size=4, stride=2)
+        self.lidar_conv4 = nn.Conv1d(48, 64, kernel_size=3)
+        self.lidar_conv5 = nn.Conv1d(64, 64, kernel_size=3)
+
+        with torch.no_grad():
+            dummy_lidar = torch.zeros(1, 1, input_dim)
+            x = self.lidar_conv5(self.lidar_conv4(self.lidar_conv3(
+                self.lidar_conv2(self.lidar_conv1(dummy_lidar)))))
+            lidar_flatten_dim = x.view(1, -1).shape[1]
+
+        # --- Local BEV Branch ---
+        self.local_bev_conv1 = nn.Conv2d(local_bev_channels, 16, kernel_size=3, stride=2, padding=1)
+        self.local_bev_conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1)
+        self.local_bev_conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)
+
+        with torch.no_grad():
+            dummy_bev = torch.zeros(1, local_bev_channels, local_bev_size, local_bev_size)
+            x = self.local_bev_conv3(self.local_bev_conv2(self.local_bev_conv1(dummy_bev)))
+            local_bev_flatten_dim = x.view(1, -1).shape[1]
+
+        self.local_bev_fc = nn.Linear(local_bev_flatten_dim, 256)
+
+        # --- State Branch ---
+        self.state_fc = nn.Linear(state_dim, 64)
+
+        # --- Fusion Head ---
+        fusion_dim = lidar_flatten_dim + 256 + 64
+
+        self.fc1 = nn.Linear(fusion_dim, 100)
+        self.fc2 = nn.Linear(100, 50)
+        self.fc3 = nn.Linear(50, 10)
+        self.fc4 = nn.Linear(10, output_dim)
+
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Linear)):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(
+        self,
+        lidar: Float[Tensor, "batch 1 input_dim"],
+        local_bev: Float[Tensor, "batch channels height width"],
+        state: Float[Tensor, "batch state_dim"]
+    ) -> Float[Tensor, "batch output_dim"]:
+        """Forward pass with LiDAR, local BEV, and state inputs.
+
+        Args:
+            lidar: Normalized LiDAR scan (batch, 1, input_dim)
+            local_bev: Local BEV image (batch, 2, 64, 64)
+            state: Odometry state vector (batch, state_dim)
+
+        Returns:
+            Control output [acceleration, steering] (batch, output_dim)
+        """
+        # LiDAR branch
+        x_lidar = F.relu(self.lidar_conv1(lidar))
+        x_lidar = F.relu(self.lidar_conv2(x_lidar))
+        x_lidar = F.relu(self.lidar_conv3(x_lidar))
+        x_lidar = F.relu(self.lidar_conv4(x_lidar))
+        x_lidar = F.relu(self.lidar_conv5(x_lidar))
+        lidar_features = x_lidar.view(x_lidar.size(0), -1)
+
+        # Local BEV branch
+        x_bev = F.relu(self.local_bev_conv1(local_bev))
+        x_bev = F.relu(self.local_bev_conv2(x_bev))
+        x_bev = F.relu(self.local_bev_conv3(x_bev))
+        x_bev = x_bev.view(x_bev.size(0), -1)
+        local_bev_features = F.relu(self.local_bev_fc(x_bev))
+
+        # State branch
+        state_features = F.relu(self.state_fc(state))
+
+        # Late fusion
+        fused = torch.cat([lidar_features, local_bev_features, state_features], dim=1)
+
+        # Regression head
+        x = F.relu(self.fc1(fused))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        return torch.tanh(self.fc4(x))
+
+
+class TinyLidarNetGlobalBEV(nn.Module):
+    """Pattern B: LiDAR + Global BEV + State fusion.
+
+    Global BEV characteristics:
+    - Map-fixed coordinates, no rotation
+    - 128x128 grid, 3 channels (left/right boundaries + ego position)
+    - Good for global planning and route understanding
+
+    Args:
+        input_dim: LiDAR scan dimension (default: 1080)
+        state_dim: Odometry state dimension (default: 13)
+        global_bev_size: Global BEV grid size (default: 128)
+        global_bev_channels: Number of BEV channels (default: 3)
+        output_dim: Output dimension (default: 2 for accel/steer)
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 1080,
+        state_dim: int = 13,
+        global_bev_size: int = 128,
+        global_bev_channels: int = 3,
+        output_dim: int = 2
+    ):
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.state_dim = state_dim
+        self.global_bev_size = global_bev_size
+        self.global_bev_channels = global_bev_channels
+
+        # --- LiDAR Branch ---
+        self.lidar_conv1 = nn.Conv1d(1, 24, kernel_size=10, stride=4)
+        self.lidar_conv2 = nn.Conv1d(24, 36, kernel_size=8, stride=4)
+        self.lidar_conv3 = nn.Conv1d(36, 48, kernel_size=4, stride=2)
+        self.lidar_conv4 = nn.Conv1d(48, 64, kernel_size=3)
+        self.lidar_conv5 = nn.Conv1d(64, 64, kernel_size=3)
+
+        with torch.no_grad():
+            dummy_lidar = torch.zeros(1, 1, input_dim)
+            x = self.lidar_conv5(self.lidar_conv4(self.lidar_conv3(
+                self.lidar_conv2(self.lidar_conv1(dummy_lidar)))))
+            lidar_flatten_dim = x.view(1, -1).shape[1]
+
+        # --- Global BEV Branch (larger network for bigger grid) ---
+        self.global_bev_conv1 = nn.Conv2d(global_bev_channels, 16, kernel_size=3, stride=2, padding=1)
+        self.global_bev_conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1)
+        self.global_bev_conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)
+        self.global_bev_conv4 = nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1)
+
+        with torch.no_grad():
+            dummy_bev = torch.zeros(1, global_bev_channels, global_bev_size, global_bev_size)
+            x = self.global_bev_conv4(self.global_bev_conv3(
+                self.global_bev_conv2(self.global_bev_conv1(dummy_bev))))
+            global_bev_flatten_dim = x.view(1, -1).shape[1]
+
+        self.global_bev_fc = nn.Linear(global_bev_flatten_dim, 256)
+
+        # --- State Branch ---
+        self.state_fc = nn.Linear(state_dim, 64)
+
+        # --- Fusion Head ---
+        fusion_dim = lidar_flatten_dim + 256 + 64
+
+        self.fc1 = nn.Linear(fusion_dim, 100)
+        self.fc2 = nn.Linear(100, 50)
+        self.fc3 = nn.Linear(50, 10)
+        self.fc4 = nn.Linear(10, output_dim)
+
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Linear)):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(
+        self,
+        lidar: Float[Tensor, "batch 1 input_dim"],
+        global_bev: Float[Tensor, "batch channels height width"],
+        state: Float[Tensor, "batch state_dim"]
+    ) -> Float[Tensor, "batch output_dim"]:
+        """Forward pass with LiDAR, global BEV, and state inputs.
+
+        Args:
+            lidar: Normalized LiDAR scan (batch, 1, input_dim)
+            global_bev: Global BEV image (batch, 3, 128, 128)
+            state: Odometry state vector (batch, state_dim)
+
+        Returns:
+            Control output [acceleration, steering] (batch, output_dim)
+        """
+        # LiDAR branch
+        x_lidar = F.relu(self.lidar_conv1(lidar))
+        x_lidar = F.relu(self.lidar_conv2(x_lidar))
+        x_lidar = F.relu(self.lidar_conv3(x_lidar))
+        x_lidar = F.relu(self.lidar_conv4(x_lidar))
+        x_lidar = F.relu(self.lidar_conv5(x_lidar))
+        lidar_features = x_lidar.view(x_lidar.size(0), -1)
+
+        # Global BEV branch
+        x_bev = F.relu(self.global_bev_conv1(global_bev))
+        x_bev = F.relu(self.global_bev_conv2(x_bev))
+        x_bev = F.relu(self.global_bev_conv3(x_bev))
+        x_bev = F.relu(self.global_bev_conv4(x_bev))
+        x_bev = x_bev.view(x_bev.size(0), -1)
+        global_bev_features = F.relu(self.global_bev_fc(x_bev))
+
+        # State branch
+        state_features = F.relu(self.state_fc(state))
+
+        # Late fusion
+        fused = torch.cat([lidar_features, global_bev_features, state_features], dim=1)
+
+        # Regression head
+        x = F.relu(self.fc1(fused))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        return torch.tanh(self.fc4(x))
+
+
+class TinyLidarNetDualBEV(nn.Module):
+    """Pattern C: LiDAR + Local BEV + Global BEV + State fusion.
+
+    Dual BEV combines both local and global representations:
+    - Local BEV: 64x64, 2 channels (vehicle-centered)
+    - Global BEV: 128x128, 3 channels (map-fixed)
+    - Best of both worlds for comprehensive understanding
+
+    Args:
+        input_dim: LiDAR scan dimension (default: 1080)
+        state_dim: Odometry state dimension (default: 13)
+        local_bev_size: Local BEV grid size (default: 64)
+        local_bev_channels: Number of local BEV channels (default: 2)
+        global_bev_size: Global BEV grid size (default: 128)
+        global_bev_channels: Number of global BEV channels (default: 3)
+        output_dim: Output dimension (default: 2 for accel/steer)
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 1080,
+        state_dim: int = 13,
+        local_bev_size: int = 64,
+        local_bev_channels: int = 2,
+        global_bev_size: int = 128,
+        global_bev_channels: int = 3,
+        output_dim: int = 2
+    ):
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.state_dim = state_dim
+
+        # --- LiDAR Branch ---
+        self.lidar_conv1 = nn.Conv1d(1, 24, kernel_size=10, stride=4)
+        self.lidar_conv2 = nn.Conv1d(24, 36, kernel_size=8, stride=4)
+        self.lidar_conv3 = nn.Conv1d(36, 48, kernel_size=4, stride=2)
+        self.lidar_conv4 = nn.Conv1d(48, 64, kernel_size=3)
+        self.lidar_conv5 = nn.Conv1d(64, 64, kernel_size=3)
+
+        with torch.no_grad():
+            dummy_lidar = torch.zeros(1, 1, input_dim)
+            x = self.lidar_conv5(self.lidar_conv4(self.lidar_conv3(
+                self.lidar_conv2(self.lidar_conv1(dummy_lidar)))))
+            lidar_flatten_dim = x.view(1, -1).shape[1]
+
+        # --- Local BEV Branch ---
+        self.local_bev_conv1 = nn.Conv2d(local_bev_channels, 16, kernel_size=3, stride=2, padding=1)
+        self.local_bev_conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1)
+        self.local_bev_conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)
+
+        with torch.no_grad():
+            dummy_local = torch.zeros(1, local_bev_channels, local_bev_size, local_bev_size)
+            x = self.local_bev_conv3(self.local_bev_conv2(self.local_bev_conv1(dummy_local)))
+            local_bev_flatten_dim = x.view(1, -1).shape[1]
+
+        self.local_bev_fc = nn.Linear(local_bev_flatten_dim, 256)
+
+        # --- Global BEV Branch ---
+        self.global_bev_conv1 = nn.Conv2d(global_bev_channels, 16, kernel_size=3, stride=2, padding=1)
+        self.global_bev_conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1)
+        self.global_bev_conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1)
+        self.global_bev_conv4 = nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1)
+
+        with torch.no_grad():
+            dummy_global = torch.zeros(1, global_bev_channels, global_bev_size, global_bev_size)
+            x = self.global_bev_conv4(self.global_bev_conv3(
+                self.global_bev_conv2(self.global_bev_conv1(dummy_global))))
+            global_bev_flatten_dim = x.view(1, -1).shape[1]
+
+        self.global_bev_fc = nn.Linear(global_bev_flatten_dim, 256)
+
+        # --- State Branch ---
+        self.state_fc = nn.Linear(state_dim, 64)
+
+        # --- Fusion Head (larger for dual BEV) ---
+        # lidar + local_bev + global_bev + state = 1792 + 256 + 256 + 64 = 2368
+        fusion_dim = lidar_flatten_dim + 256 + 256 + 64
+
+        self.fc1 = nn.Linear(fusion_dim, 256)
+        self.fc2 = nn.Linear(256, 64)
+        self.fc3 = nn.Linear(64, 10)
+        self.fc4 = nn.Linear(10, output_dim)
+
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Linear)):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(
+        self,
+        lidar: Float[Tensor, "batch 1 input_dim"],
+        local_bev: Float[Tensor, "batch local_ch local_h local_w"],
+        global_bev: Float[Tensor, "batch global_ch global_h global_w"],
+        state: Float[Tensor, "batch state_dim"]
+    ) -> Float[Tensor, "batch output_dim"]:
+        """Forward pass with LiDAR, local BEV, global BEV, and state inputs.
+
+        Args:
+            lidar: Normalized LiDAR scan (batch, 1, input_dim)
+            local_bev: Local BEV image (batch, 2, 64, 64)
+            global_bev: Global BEV image (batch, 3, 128, 128)
+            state: Odometry state vector (batch, state_dim)
+
+        Returns:
+            Control output [acceleration, steering] (batch, output_dim)
+        """
+        # LiDAR branch
+        x_lidar = F.relu(self.lidar_conv1(lidar))
+        x_lidar = F.relu(self.lidar_conv2(x_lidar))
+        x_lidar = F.relu(self.lidar_conv3(x_lidar))
+        x_lidar = F.relu(self.lidar_conv4(x_lidar))
+        x_lidar = F.relu(self.lidar_conv5(x_lidar))
+        lidar_features = x_lidar.view(x_lidar.size(0), -1)
+
+        # Local BEV branch
+        x_local = F.relu(self.local_bev_conv1(local_bev))
+        x_local = F.relu(self.local_bev_conv2(x_local))
+        x_local = F.relu(self.local_bev_conv3(x_local))
+        x_local = x_local.view(x_local.size(0), -1)
+        local_bev_features = F.relu(self.local_bev_fc(x_local))
+
+        # Global BEV branch
+        x_global = F.relu(self.global_bev_conv1(global_bev))
+        x_global = F.relu(self.global_bev_conv2(x_global))
+        x_global = F.relu(self.global_bev_conv3(x_global))
+        x_global = F.relu(self.global_bev_conv4(x_global))
+        x_global = x_global.view(x_global.size(0), -1)
+        global_bev_features = F.relu(self.global_bev_fc(x_global))
+
+        # State branch
+        state_features = F.relu(self.state_fc(state))
+
+        # Late fusion (all four branches)
+        fused = torch.cat([lidar_features, local_bev_features, global_bev_features, state_features], dim=1)
+
+        # Regression head
+        x = F.relu(self.fc1(fused))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        return torch.tanh(self.fc4(x))

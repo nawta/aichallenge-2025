@@ -12,13 +12,17 @@ from datetime import datetime
 
 from lib.model import (
     TinyLidarNet, TinyLidarNetSmall, TinyLidarNetDeep, TinyLidarNetFusion,
-    TinyLidarNetStacked, TinyLidarNetBiLSTM, TinyLidarNetTCN, TinyLidarNetMap
+    TinyLidarNetStacked, TinyLidarNetBiLSTM, TinyLidarNetTCN, TinyLidarNetMap,
+    TinyLidarNetLocalBEV, TinyLidarNetGlobalBEV, TinyLidarNetDualBEV
 )
-from lib.data import MultiSeqConcatDataset
+from lib.data import MultiSeqConcatDataset, BEVMultiSeqConcatDataset
 from lib.loss import WeightedSmoothL1Loss
 
 # Temporal model names
 TEMPORAL_MODELS = ["TinyLidarNetStacked", "TinyLidarNetBiLSTM", "TinyLidarNetTCN"]
+
+# BEV model names
+BEV_MODELS = ["TinyLidarNetLocalBEV", "TinyLidarNetGlobalBEV", "TinyLidarNetDualBEV"]
 
 
 def load_map_image(map_path: str, device: torch.device) -> torch.Tensor:
@@ -63,19 +67,33 @@ def main(cfg: DictConfig):
     is_temporal = model_name in TEMPORAL_MODELS
     use_fusion = model_name == "TinyLidarNetFusion"
     use_map = model_name == "TinyLidarNetMap"
-    
+    is_bev = model_name in BEV_MODELS
+
     # Temporal models and Fusion model require odometry data
     use_odom = is_temporal or use_fusion or cfg.model.get("use_odom", False)
-    
+
     # Sequence length for temporal models
     seq_len = cfg.model.get("seq_len", 10) if is_temporal else 1
-    
+
+    # BEV mode for BEV models
+    if is_bev:
+        if model_name == "TinyLidarNetLocalBEV":
+            bev_mode = "local"
+        elif model_name == "TinyLidarNetGlobalBEV":
+            bev_mode = "global"
+        else:  # TinyLidarNetDualBEV
+            bev_mode = "both"
+    else:
+        bev_mode = None
+
     if is_temporal:
         print(f"[INFO] Using temporal model: {model_name} with seq_len={seq_len}")
     elif use_fusion:
         print("[INFO] Using TinyLidarNetFusion - loading odometry data")
     elif use_map:
         print("[INFO] Using TinyLidarNetMap - loading map image")
+    elif is_bev:
+        print(f"[INFO] Using BEV model: {model_name} with bev_mode='{bev_mode}'")
 
     # Data augmentation settings (defaults: ON)
     augment_mirror = cfg.data.get("augment_mirror", True)
@@ -87,22 +105,60 @@ def main(cfg: DictConfig):
         print("[INFO] Mirror augmentation disabled")
 
     # === Dataset ===
-    # Training data: apply augmentation based on config
-    train_dataset = MultiSeqConcatDataset(
-        cfg.data.train_dir, 
-        use_odom=use_odom,
-        seq_len=seq_len,
-        augment_mirror=augment_mirror,
-        augment_prob=augment_prob
-    )
-    # Validation data: no augmentation for fair evaluation
-    val_dataset = MultiSeqConcatDataset(
-        cfg.data.val_dir, 
-        use_odom=use_odom,
-        seq_len=seq_len,
-        augment_mirror=False,
-        augment_prob=0.0
-    )
+    if is_bev:
+        # BEV models: use BEVMultiSeqConcatDataset
+        lane_csv_path = cfg.model.lane_csv_path
+        local_grid_size = cfg.model.get("local_grid_size", 64)
+        local_resolution = cfg.model.get("local_resolution", 1.0)
+        global_grid_size = cfg.model.get("global_grid_size", 128)
+        global_resolution = cfg.model.get("global_resolution", 1.5)
+
+        print(f"[INFO] Loading lane CSV from: {lane_csv_path}")
+        print(f"[INFO] Local BEV: {local_grid_size}x{local_grid_size} @ {local_resolution}m/px")
+        print(f"[INFO] Global BEV: {global_grid_size}x{global_grid_size} @ {global_resolution}m/px")
+
+        # Training data: apply augmentation based on config
+        train_dataset = BEVMultiSeqConcatDataset(
+            cfg.data.train_dir,
+            lane_csv_path=lane_csv_path,
+            bev_mode=bev_mode,
+            local_grid_size=local_grid_size,
+            local_resolution=local_resolution,
+            global_grid_size=global_grid_size,
+            global_resolution=global_resolution,
+            augment_mirror=augment_mirror,
+            augment_prob=augment_prob
+        )
+        # Validation data: no augmentation for fair evaluation
+        val_dataset = BEVMultiSeqConcatDataset(
+            cfg.data.val_dir,
+            lane_csv_path=lane_csv_path,
+            bev_mode=bev_mode,
+            local_grid_size=local_grid_size,
+            local_resolution=local_resolution,
+            global_grid_size=global_grid_size,
+            global_resolution=global_resolution,
+            augment_mirror=False,
+            augment_prob=0.0
+        )
+    else:
+        # Non-BEV models: use standard dataset
+        # Training data: apply augmentation based on config
+        train_dataset = MultiSeqConcatDataset(
+            cfg.data.train_dir,
+            use_odom=use_odom,
+            seq_len=seq_len,
+            augment_mirror=augment_mirror,
+            augment_prob=augment_prob
+        )
+        # Validation data: no augmentation for fair evaluation
+        val_dataset = MultiSeqConcatDataset(
+            cfg.data.val_dir,
+            use_odom=use_odom,
+            seq_len=seq_len,
+            augment_mirror=False,
+            augment_prob=0.0
+        )
 
     train_loader = DataLoader(
         train_dataset,
@@ -176,7 +232,7 @@ def main(cfg: DictConfig):
             map_feature_dim=map_feature_dim,
             output_dim=cfg.model.output_dim
         ).to(device)
-        
+
         # Load and cache map image
         map_image_path = cfg.model.get("map_image_path", None)
         if map_image_path:
@@ -185,6 +241,32 @@ def main(cfg: DictConfig):
             print(f"[INFO] Map image loaded and cached from: {map_image_path}")
         else:
             print("[WARN] No map_image_path specified - model will require map_image in forward()")
+    elif model_name == "TinyLidarNetLocalBEV":
+        model = TinyLidarNetLocalBEV(
+            input_dim=cfg.model.input_dim,
+            local_grid_size=cfg.model.get("local_grid_size", 64),
+            local_channels=2,
+            state_dim=state_dim,
+            output_dim=cfg.model.output_dim
+        ).to(device)
+    elif model_name == "TinyLidarNetGlobalBEV":
+        model = TinyLidarNetGlobalBEV(
+            input_dim=cfg.model.input_dim,
+            global_grid_size=cfg.model.get("global_grid_size", 128),
+            global_channels=3,
+            state_dim=state_dim,
+            output_dim=cfg.model.output_dim
+        ).to(device)
+    elif model_name == "TinyLidarNetDualBEV":
+        model = TinyLidarNetDualBEV(
+            input_dim=cfg.model.input_dim,
+            local_grid_size=cfg.model.get("local_grid_size", 64),
+            local_channels=2,
+            global_grid_size=cfg.model.get("global_grid_size", 128),
+            global_channels=3,
+            state_dim=state_dim,
+            output_dim=cfg.model.output_dim
+        ).to(device)
     else:
         model = TinyLidarNet(
             input_dim=cfg.model.input_dim,
@@ -258,11 +340,57 @@ def main(cfg: DictConfig):
                     scans, targets = batch
                     scans = scans.unsqueeze(1).to(device)
                     targets = targets.to(device)
-                    
+
                     scans = clean_numerical_tensor(scans)
                     targets = clean_numerical_tensor(targets)
-                    
+
                     outputs = model(scans)  # Uses cached map features
+                elif is_bev:
+                    # BEV models: unpack based on bev_mode
+                    if bev_mode == 'local':
+                        # (scan, local_bev, odom, target)
+                        scans, local_bev, odom, targets = batch
+                        scans = scans.unsqueeze(1).to(device)
+                        local_bev = local_bev.to(device)
+                        odom = odom.to(device)
+                        targets = targets.to(device)
+
+                        scans = clean_numerical_tensor(scans)
+                        local_bev = clean_numerical_tensor(local_bev)
+                        odom = clean_numerical_tensor(odom)
+                        targets = clean_numerical_tensor(targets)
+
+                        outputs = model(scans, local_bev, odom)
+                    elif bev_mode == 'global':
+                        # (scan, global_bev, odom, target)
+                        scans, global_bev, odom, targets = batch
+                        scans = scans.unsqueeze(1).to(device)
+                        global_bev = global_bev.to(device)
+                        odom = odom.to(device)
+                        targets = targets.to(device)
+
+                        scans = clean_numerical_tensor(scans)
+                        global_bev = clean_numerical_tensor(global_bev)
+                        odom = clean_numerical_tensor(odom)
+                        targets = clean_numerical_tensor(targets)
+
+                        outputs = model(scans, global_bev, odom)
+                    else:  # 'both'
+                        # (scan, local_bev, global_bev, odom, target)
+                        scans, local_bev, global_bev, odom, targets = batch
+                        scans = scans.unsqueeze(1).to(device)
+                        local_bev = local_bev.to(device)
+                        global_bev = global_bev.to(device)
+                        odom = odom.to(device)
+                        targets = targets.to(device)
+
+                        scans = clean_numerical_tensor(scans)
+                        local_bev = clean_numerical_tensor(local_bev)
+                        global_bev = clean_numerical_tensor(global_bev)
+                        odom = clean_numerical_tensor(odom)
+                        targets = clean_numerical_tensor(targets)
+
+                        outputs = model(scans, local_bev, global_bev, odom)
                 else:
                     # Standard model: (scans, targets)
                     scans, targets = batch
@@ -283,8 +411,9 @@ def main(cfg: DictConfig):
 
             avg_train_loss = train_loss / len(train_loader)
             avg_val_loss = validate(
-                model, val_loader, device, criterion, 
-                use_odom=use_odom, is_temporal=is_temporal, use_map=use_map, model_name=model_name
+                model, val_loader, device, criterion,
+                use_odom=use_odom, is_temporal=is_temporal, use_map=use_map,
+                is_bev=is_bev, bev_mode=bev_mode, model_name=model_name
             )
 
             print(f"Epoch {epoch+1:03d}: Train={avg_train_loss:.4f} | Val={avg_val_loss:.4f}")
@@ -308,8 +437,9 @@ def main(cfg: DictConfig):
 
 
 def validate(
-    model, loader, device, criterion, 
-    use_odom: bool = False, is_temporal: bool = False, use_map: bool = False, model_name: str = ""
+    model, loader, device, criterion,
+    use_odom: bool = False, is_temporal: bool = False, use_map: bool = False,
+    is_bev: bool = False, bev_mode: str = None, model_name: str = ""
 ):
     model.eval()
     total_loss = 0.0
@@ -321,11 +451,11 @@ def validate(
                 scans = scans.to(device)
                 odoms = odoms.to(device)
                 targets = targets.to(device)
-                
+
                 scans = clean_numerical_tensor(scans)
                 odoms = clean_numerical_tensor(odoms)
                 targets = clean_numerical_tensor(targets)
-                
+
                 if model_name == "TinyLidarNetBiLSTM":
                     # Use bidirectional during validation too (same as training)
                     outputs = model(scans, odoms, use_bidirectional=True)
@@ -337,33 +467,76 @@ def validate(
                 scans = scans.unsqueeze(1).to(device)
                 odom = odom.to(device)
                 targets = targets.to(device)
-                
+
                 scans = clean_numerical_tensor(scans)
                 odom = clean_numerical_tensor(odom)
                 targets = clean_numerical_tensor(targets)
-                
+
                 outputs = model(scans, odom)
             elif use_map:
                 # Map model: (scans, targets) - uses cached map features
                 scans, targets = batch
                 scans = scans.unsqueeze(1).to(device)
                 targets = targets.to(device)
-                
+
                 scans = clean_numerical_tensor(scans)
                 targets = clean_numerical_tensor(targets)
-                
+
                 outputs = model(scans)  # Uses cached map features
+            elif is_bev:
+                # BEV models: unpack based on bev_mode
+                if bev_mode == 'local':
+                    scans, local_bev, odom, targets = batch
+                    scans = scans.unsqueeze(1).to(device)
+                    local_bev = local_bev.to(device)
+                    odom = odom.to(device)
+                    targets = targets.to(device)
+
+                    scans = clean_numerical_tensor(scans)
+                    local_bev = clean_numerical_tensor(local_bev)
+                    odom = clean_numerical_tensor(odom)
+                    targets = clean_numerical_tensor(targets)
+
+                    outputs = model(scans, local_bev, odom)
+                elif bev_mode == 'global':
+                    scans, global_bev, odom, targets = batch
+                    scans = scans.unsqueeze(1).to(device)
+                    global_bev = global_bev.to(device)
+                    odom = odom.to(device)
+                    targets = targets.to(device)
+
+                    scans = clean_numerical_tensor(scans)
+                    global_bev = clean_numerical_tensor(global_bev)
+                    odom = clean_numerical_tensor(odom)
+                    targets = clean_numerical_tensor(targets)
+
+                    outputs = model(scans, global_bev, odom)
+                else:  # 'both'
+                    scans, local_bev, global_bev, odom, targets = batch
+                    scans = scans.unsqueeze(1).to(device)
+                    local_bev = local_bev.to(device)
+                    global_bev = global_bev.to(device)
+                    odom = odom.to(device)
+                    targets = targets.to(device)
+
+                    scans = clean_numerical_tensor(scans)
+                    local_bev = clean_numerical_tensor(local_bev)
+                    global_bev = clean_numerical_tensor(global_bev)
+                    odom = clean_numerical_tensor(odom)
+                    targets = clean_numerical_tensor(targets)
+
+                    outputs = model(scans, local_bev, global_bev, odom)
             else:
                 # Standard model: (scans, targets)
                 scans, targets = batch
                 scans = scans.unsqueeze(1).to(device)
                 targets = targets.to(device)
-                
+
                 scans = clean_numerical_tensor(scans)
                 targets = clean_numerical_tensor(targets)
-                
+
                 outputs = model(scans)
-            
+
             loss = criterion(outputs, targets)
             total_loss += loss.item()
     return total_loss / len(loader)
