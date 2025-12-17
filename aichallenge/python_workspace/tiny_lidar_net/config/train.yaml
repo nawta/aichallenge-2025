@@ -27,6 +27,19 @@ model:
   tcn_kernel_size: 3
   tcn_causal: false  # 学習時はnon-causal（未来も見る）
 
+  # === Map モデル用パラメータ ===
+  map_image_path: null  # マップ画像パス（例: /aichallenge/map_image/1.png）
+  map_feature_dim: 128  # マップ特徴量の次元
+
+  # === BEV モデル用パラメータ ===
+  lane_csv_path: null   # レーン境界CSVパス
+  local_bev_size: 64    # ローカルBEVグリッドサイズ
+  local_bev_channels: 2 # ローカルBEVチャンネル数
+  local_resolution: 1.0 # ローカルBEV解像度 (m/pixel)
+  global_bev_size: 128  # グローバルBEVグリッドサイズ
+  global_bev_channels: 3 # グローバルBEVチャンネル数
+  global_resolution: 1.5 # グローバルBEV解像度 (m/pixel)
+
 train:
   batch_size: 64
   num_workers: 4

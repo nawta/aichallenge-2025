@@ -121,7 +121,12 @@ echo "Testing BEV Models"
 echo "=========================================="
 
 LANE_CSV="/aichallenge/workspace/src/aichallenge_submit/laserscan_generator/map/lane.csv"
-if [ -f "${LANE_CSV}" ]; then
+TRAIN_DIR="/aichallenge/python_workspace/tiny_lidar_net/dataset/train"
+
+# Check if any odom.npy exists in dataset (required for BEV models)
+ODOM_EXISTS=$(find "${TRAIN_DIR}" -name "odom.npy" 2>/dev/null | head -1)
+
+if [ -f "${LANE_CSV}" ] && [ -n "${ODOM_EXISTS}" ]; then
     BEV_EXTRA="model.lane_csv_path='${LANE_CSV}' model.local_bev_size=32 model.global_bev_size=64"
 
     for MODEL in "TinyLidarNetLocalBEV" "TinyLidarNetGlobalBEV" "TinyLidarNetDualBEV"; do
@@ -131,8 +136,11 @@ if [ -f "${LANE_CSV}" ]; then
             ((FAILED++))
         fi
     done
-else
+elif [ ! -f "${LANE_CSV}" ]; then
     echo "⚠️  Lane CSV not found: ${LANE_CSV}, skipping BEV models"
+else
+    echo "⚠️  No odom.npy found in dataset (required for BEV models), skipping BEV models"
+    echo "   Run extract_data_from_bag.py with --extract-odom to generate odom data"
 fi
 
 # =============================================================================
