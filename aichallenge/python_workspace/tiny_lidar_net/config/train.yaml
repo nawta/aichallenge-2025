@@ -45,8 +45,22 @@ train:
   num_workers: 4
   epochs: 100
   lr: 0.001
-  
+
+  # Early stopping (null or 0 to disable)
   early_stop_patience: 15
+
+  # LR Scheduler settings
+  scheduler:
+    # "cosine", "step", "plateau", or null to disable
+    type: "cosine"
+    # For cosine: T_max is set to epochs automatically
+    # For step: step_size and gamma
+    step_size: 30
+    gamma: 0.1
+    # For plateau: factor, patience, min_lr
+    factor: 0.5
+    patience: 5
+    min_lr: 0.00001
 
   # 事前学習済みモデルのパス（指定しない場合は null）
   pretrained_path: null

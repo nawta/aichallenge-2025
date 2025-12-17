@@ -1,6 +1,7 @@
 from pathlib import Path
 import torch
 import torch.optim as optim
+from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, ReduceLROnPlateau
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from PIL import Image
@@ -51,6 +52,54 @@ def clean_numerical_tensor(x: torch.Tensor) -> torch.Tensor:
     if torch.isnan(x).any() or torch.isinf(x).any():
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     return x
+
+
+def create_scheduler(optimizer, cfg: DictConfig):
+    """Create learning rate scheduler based on config.
+
+    Args:
+        optimizer: PyTorch optimizer
+        cfg: Hydra config with train.scheduler settings
+
+    Returns:
+        Scheduler instance or None if disabled
+    """
+    scheduler_cfg = cfg.train.get("scheduler", None)
+    if scheduler_cfg is None:
+        return None
+
+    scheduler_type = scheduler_cfg.get("type", None)
+    if scheduler_type is None:
+        return None
+
+    if scheduler_type == "cosine":
+        scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=cfg.train.epochs,
+            eta_min=scheduler_cfg.get("min_lr", 0)
+        )
+        print(f"[INFO] Using CosineAnnealingLR scheduler (T_max={cfg.train.epochs})")
+    elif scheduler_type == "step":
+        scheduler = StepLR(
+            optimizer,
+            step_size=scheduler_cfg.get("step_size", 30),
+            gamma=scheduler_cfg.get("gamma", 0.1)
+        )
+        print(f"[INFO] Using StepLR scheduler (step_size={scheduler_cfg.step_size}, gamma={scheduler_cfg.gamma})")
+    elif scheduler_type == "plateau":
+        scheduler = ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=scheduler_cfg.get("factor", 0.5),
+            patience=scheduler_cfg.get("patience", 5),
+            min_lr=scheduler_cfg.get("min_lr", 1e-6)
+        )
+        print(f"[INFO] Using ReduceLROnPlateau scheduler (factor={scheduler_cfg.factor}, patience={scheduler_cfg.patience})")
+    else:
+        print(f"[WARN] Unknown scheduler type: {scheduler_type}, no scheduler will be used")
+        return None
+
+    return scheduler
 
 
 @hydra.main(config_path="./config", config_name="train", version_base="1.2")
@@ -284,6 +333,9 @@ def main(cfg: DictConfig):
     )
     optimizer = optim.Adam(model.parameters(), lr=cfg.train.lr)
 
+    # === LR Scheduler ===
+    scheduler = create_scheduler(optimizer, cfg)
+
     # === Logging & Save dirs ===
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     save_dir = Path(cfg.train.save_dir).expanduser().resolve()
@@ -294,7 +346,13 @@ def main(cfg: DictConfig):
     with SummaryWriter(log_dir / timestamp) as writer:
         best_val_loss = float("inf")
         patience_counter = 0
-        max_patience = cfg.train.get("early_stop_patience", 10)
+        # Early stopping: None or 0 disables it
+        max_patience = cfg.train.get("early_stop_patience", None)
+        use_early_stopping = max_patience is not None and max_patience > 0
+        if use_early_stopping:
+            print(f"[INFO] Early stopping enabled with patience={max_patience}")
+        else:
+            print("[INFO] Early stopping disabled")
 
         best_path = save_dir / "best_model.pth"
         last_path = save_dir / "last_model.pth"
@@ -416,9 +474,12 @@ def main(cfg: DictConfig):
                 is_bev=is_bev, bev_mode=bev_mode, model_name=model_name
             )
 
-            print(f"Epoch {epoch+1:03d}: Train={avg_train_loss:.4f} | Val={avg_val_loss:.4f}")
+            # Get current learning rate
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f"Epoch {epoch+1:03d}: Train={avg_train_loss:.4f} | Val={avg_val_loss:.4f} | LR={current_lr:.6f}")
             writer.add_scalar("Loss/train", avg_train_loss, epoch + 1)
             writer.add_scalar("Loss/val", avg_val_loss, epoch + 1)
+            writer.add_scalar("LR", current_lr, epoch + 1)
 
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
@@ -429,10 +490,19 @@ def main(cfg: DictConfig):
                 patience_counter += 1
 
             torch.save(model.state_dict(), last_path)
-            if patience_counter >= max_patience:
+
+            # LR Scheduler step
+            if scheduler is not None:
+                if isinstance(scheduler, ReduceLROnPlateau):
+                    scheduler.step(avg_val_loss)
+                else:
+                    scheduler.step()
+
+            # Early stopping check (only if enabled)
+            if use_early_stopping and patience_counter >= max_patience:
                 print(f"[EarlyStop] No improvement for {max_patience} epochs.")
                 break
-    
+
     print("Training finished.")
 
 

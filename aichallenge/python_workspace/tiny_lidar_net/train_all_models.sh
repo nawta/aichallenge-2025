@@ -141,10 +141,12 @@ train_model() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" | tee -a "${SUMMARY_FILE}"
 
     # Build training command (Hydra overrides only)
+    # Note: early_stop_patience=null disables early stopping (train all epochs)
     local CMD="${USE_CPU} python3 ${SCRIPT_DIR}/train.py \
         model.name='${MODEL_NAME}' \
         data.augment_mirror=${AUGMENT} \
         train.save_dir='${SAVE_DIR}' \
+        train.early_stop_patience=null \
         ${TRAIN_EXTRA_ARGS}"
 
     # Run training
