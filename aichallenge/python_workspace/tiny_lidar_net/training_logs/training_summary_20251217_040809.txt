@@ -1,0 +1,11 @@
+=============================================
+TinyLidarNet Training Session
+Started: Wed Dec 17 04:08:09 JST 2025
+=============================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 Training: TinyLidarNet_aug
+   Augmentation: true
+   Save Dir: /aichallenge/python_workspace/tiny_lidar_net/checkpoints/TinyLidarNet_aug
+   Started: Wed Dec 17 04:08:09 JST 2025
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

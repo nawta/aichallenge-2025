@@ -1,0 +1,157 @@
+=============================================
+TinyLidarNet Training Session
+Started: Wed Dec 17 04:11:20 JST 2025
+=============================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 Training: TinyLidarNet_aug
+   Augmentation: true
+   Save Dir: /aichallenge/python_workspace/tiny_lidar_net/checkpoints/TinyLidarNet_aug
+   Started: Wed Dec 17 04:11:20 JST 2025
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Training completed in 1558s
+📦 Converting weights...
+✅ Weights saved: /aichallenge/python_workspace/tiny_lidar_net/weights/TinyLidarNet_aug.npy
+   Finished: Wed Dec 17 04:37:19 JST 2025
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 Training: TinyLidarNet_noaug
+   Augmentation: false
+   Save Dir: /aichallenge/python_workspace/tiny_lidar_net/checkpoints/TinyLidarNet_noaug
+   Started: Wed Dec 17 04:37:19 JST 2025
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Training completed in 2764s
+📦 Converting weights...
+✅ Weights saved: /aichallenge/python_workspace/tiny_lidar_net/weights/TinyLidarNet_noaug.npy
+   Finished: Wed Dec 17 05:23:26 JST 2025
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 Training: TinyLidarNetSmall_aug
+   Augmentation: true
+   Save Dir: /aichallenge/python_workspace/tiny_lidar_net/checkpoints/TinyLidarNetSmall_aug
+   Started: Wed Dec 17 05:23:26 JST 2025
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Training completed in 2364s
+📦 Converting weights...
+✅ Weights saved: /aichallenge/python_workspace/tiny_lidar_net/weights/TinyLidarNetSmall_aug.npy
+   Finished: Wed Dec 17 06:02:52 JST 2025
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 Training: TinyLidarNetSmall_noaug
+   Augmentation: false
+   Save Dir: /aichallenge/python_workspace/tiny_lidar_net/checkpoints/TinyLidarNetSmall_noaug
+   Started: Wed Dec 17 06:02:52 JST 2025
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Training completed in 1628s
+📦 Converting weights...
+✅ Weights saved: /aichallenge/python_workspace/tiny_lidar_net/weights/TinyLidarNetSmall_noaug.npy
+   Finished: Wed Dec 17 06:30:01 JST 2025
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 Training: TinyLidarNetDeep_aug
+   Augmentation: true
+   Save Dir: /aichallenge/python_workspace/tiny_lidar_net/checkpoints/TinyLidarNetDeep_aug
+   Started: Wed Dec 17 06:30:01 JST 2025
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Training completed in 1729s
+📦 Converting weights...
+✅ Weights saved: /aichallenge/python_workspace/tiny_lidar_net/weights/TinyLidarNetDeep_aug.npy
+   Finished: Wed Dec 17 06:58:51 JST 2025
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 Training: TinyLidarNetDeep_noaug
+   Augmentation: false
+   Save Dir: /aichallenge/python_workspace/tiny_lidar_net/checkpoints/TinyLidarNetDeep_noaug
+   Started: Wed Dec 17 06:58:51 JST 2025
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Training completed in 1204s
+📦 Converting weights...
+✅ Weights saved: /aichallenge/python_workspace/tiny_lidar_net/weights/TinyLidarNetDeep_noaug.npy
+   Finished: Wed Dec 17 07:18:56 JST 2025
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 Training: TinyLidarNetFusion_aug
+   Augmentation: true
+   Save Dir: /aichallenge/python_workspace/tiny_lidar_net/checkpoints/TinyLidarNetFusion_aug
+   Started: Wed Dec 17 07:18:57 JST 2025
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Training completed in 2678s
+📦 Converting weights...
+✅ Weights saved: /aichallenge/python_workspace/tiny_lidar_net/weights/TinyLidarNetFusion_aug.npy
+   Finished: Wed Dec 17 08:03:37 JST 2025
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 Training: TinyLidarNetFusion_noaug
+   Augmentation: false
+   Save Dir: /aichallenge/python_workspace/tiny_lidar_net/checkpoints/TinyLidarNetFusion_noaug
+   Started: Wed Dec 17 08:03:37 JST 2025
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Training completed in 2179s
+📦 Converting weights...
+✅ Weights saved: /aichallenge/python_workspace/tiny_lidar_net/weights/TinyLidarNetFusion_noaug.npy
+   Finished: Wed Dec 17 08:39:58 JST 2025
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 Training: TinyLidarNetStacked_aug
+   Augmentation: true
+   Save Dir: /aichallenge/python_workspace/tiny_lidar_net/checkpoints/TinyLidarNetStacked_aug
+   Started: Wed Dec 17 08:39:58 JST 2025
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Training completed in 2s
+⚠️  No best_model.pth found
+   Finished: Wed Dec 17 08:40:00 JST 2025
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 Training: TinyLidarNetStacked_noaug
+   Augmentation: false
+   Save Dir: /aichallenge/python_workspace/tiny_lidar_net/checkpoints/TinyLidarNetStacked_noaug
+   Started: Wed Dec 17 08:40:00 JST 2025
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Training completed in 2s
+⚠️  No best_model.pth found
+   Finished: Wed Dec 17 08:40:02 JST 2025
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 Training: TinyLidarNetBiLSTM_aug
+   Augmentation: true
+   Save Dir: /aichallenge/python_workspace/tiny_lidar_net/checkpoints/TinyLidarNetBiLSTM_aug
+   Started: Wed Dec 17 08:40:02 JST 2025
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Training completed in 1s
+⚠️  No best_model.pth found
+   Finished: Wed Dec 17 08:40:04 JST 2025
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 Training: TinyLidarNetBiLSTM_noaug
+   Augmentation: false
+   Save Dir: /aichallenge/python_workspace/tiny_lidar_net/checkpoints/TinyLidarNetBiLSTM_noaug
+   Started: Wed Dec 17 08:40:04 JST 2025
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Training completed in 1s
+⚠️  No best_model.pth found
+   Finished: Wed Dec 17 08:40:05 JST 2025
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 Training: TinyLidarNetTCN_aug
+   Augmentation: true
+   Save Dir: /aichallenge/python_workspace/tiny_lidar_net/checkpoints/TinyLidarNetTCN_aug
+   Started: Wed Dec 17 08:40:06 JST 2025
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Training completed in 1s
+⚠️  No best_model.pth found
+   Finished: Wed Dec 17 08:40:07 JST 2025
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 Training: TinyLidarNetTCN_noaug
+   Augmentation: false
+   Save Dir: /aichallenge/python_workspace/tiny_lidar_net/checkpoints/TinyLidarNetTCN_noaug
+   Started: Wed Dec 17 08:40:07 JST 2025
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Training completed in 2s
+⚠️  No best_model.pth found
+   Finished: Wed Dec 17 08:40:09 JST 2025
+
+=============================================
+🎉 All Training Complete!
+Finished: Wed Dec 17 08:40:09 JST 2025
+=============================================
