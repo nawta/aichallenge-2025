@@ -984,6 +984,45 @@ python3 train.py \
 
 ---
 
+## 🐛 Bug Fix: BiLSTM/TCN Tensor Reshape
+
+### 発見した問題
+
+`TinyLidarNetBiLSTM` と `TinyLidarNetTCN` のforward内で、入力テンソルの形状変換にバグがあった。
+
+**Before (誤り):**
+```python
+scan_t = scans[:, t:t+1, :].transpose(1, 2)  # (batch, 1, scan_dim)
+```
+
+- `scans[:, t:t+1, :]` は `(batch, 1, scan_dim)` を返す
+- `.transpose(1, 2)` すると `(batch, scan_dim, 1)` になる（間違い）
+- Conv1dは `(batch, 1, scan_dim)` を期待するためエラー
+
+**After (修正):**
+```python
+scan_t = scans[:, t, :].unsqueeze(1)  # (batch, scan_dim) -> (batch, 1, scan_dim)
+```
+
+- `scans[:, t, :]` は `(batch, scan_dim)` を返す
+- `.unsqueeze(1)` で `(batch, 1, scan_dim)` になる（正しい）
+
+### 修正コミット
+
+```bash
+git commit a5baef5 fix(tiny_lidar_net): fix tensor reshape bug in BiLSTM and TCN models
+```
+
+### モデル検証結果
+
+全11モデルのforward-pass検証に成功:
+- TinyLidarNet, TinyLidarNetSmall, TinyLidarNetDeep, TinyLidarNetFusion
+- TinyLidarNetStacked, TinyLidarNetBiLSTM, TinyLidarNetTCN
+- TinyLidarNetMap
+- TinyLidarNetLocalBEV, TinyLidarNetGlobalBEV, TinyLidarNetDualBEV
+
+---
+
 ## 📚 参考
 
 - [TinyLidarNet Paper (arXiv:2410.07447)](https://arxiv.org/abs/2410.07447)
