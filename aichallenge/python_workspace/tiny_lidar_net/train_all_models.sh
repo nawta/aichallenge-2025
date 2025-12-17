@@ -94,9 +94,11 @@ BEV_MODELS=(
 LANE_CSV_PATH="/aichallenge/workspace/src/aichallenge_submit/laserscan_generator/map/lane.csv"
 
 # BEV parameters
-LOCAL_GRID_SIZE=64
+LOCAL_BEV_SIZE=64
+LOCAL_BEV_CHANNELS=2
 LOCAL_RESOLUTION=1.0
-GLOBAL_GRID_SIZE=128
+GLOBAL_BEV_SIZE=128
+GLOBAL_BEV_CHANNELS=3
 GLOBAL_RESOLUTION=1.5
 
 # =============================================================================
@@ -306,10 +308,10 @@ for MODEL_INFO in "${BEV_MODELS[@]}"; do
     CONVERT_NAME="${MODEL_INFO##*:}"
 
     # Hydra overrides for train.py
-    TRAIN_EXTRA="model.lane_csv_path='${LANE_CSV_PATH}' model.local_grid_size=${LOCAL_GRID_SIZE} model.local_resolution=${LOCAL_RESOLUTION} model.global_grid_size=${GLOBAL_GRID_SIZE} model.global_resolution=${GLOBAL_RESOLUTION}"
+    TRAIN_EXTRA="model.lane_csv_path='${LANE_CSV_PATH}' model.local_bev_size=${LOCAL_BEV_SIZE} model.local_bev_channels=${LOCAL_BEV_CHANNELS} model.local_resolution=${LOCAL_RESOLUTION} model.global_bev_size=${GLOBAL_BEV_SIZE} model.global_bev_channels=${GLOBAL_BEV_CHANNELS} model.global_resolution=${GLOBAL_RESOLUTION}"
 
     # CLI args for convert_weight.py
-    CONVERT_EXTRA="--local-grid-size ${LOCAL_GRID_SIZE} --global-grid-size ${GLOBAL_GRID_SIZE}"
+    CONVERT_EXTRA="--local-bev-size ${LOCAL_BEV_SIZE} --local-bev-channels ${LOCAL_BEV_CHANNELS} --global-bev-size ${GLOBAL_BEV_SIZE} --global-bev-channels ${GLOBAL_BEV_CHANNELS}"
 
     # With augmentation
     train_model "${MODEL_NAME}" "${CONVERT_NAME}" "true" "${TRAIN_EXTRA}" "${CONVERT_EXTRA}"
