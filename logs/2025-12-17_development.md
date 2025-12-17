@@ -1023,6 +1023,202 @@ git commit a5baef5 fix(tiny_lidar_net): fix tensor reshape bug in BiLSTM and TCN
 
 ---
 
+## 🔧 BEV Parameter Alignment & LR Scheduler
+
+### 発見した問題
+
+BEVモデルの学習時に以下のエラーが発生:
+
+```
+TinyLidarNetLocalBEV.__init__() got an unexpected keyword argument 'local_grid_size'
+RuntimeError: mat1 and mat2 shapes cannot be multiplied (8x4096 and 1024x256)
+```
+
+### 根本原因
+
+パラメータ名の不整合:
+- `train.py`, `train_all_models.sh`, `convert_weight.py` で使用していた名前: `local_grid_size`, `local_channels`, `global_grid_size`, `global_channels`
+- `lib/model.py` のモデル定義で期待する名前: `local_bev_size`, `local_bev_channels`, `global_bev_size`, `global_bev_channels`
+
+### 修正内容
+
+#### 1. パラメータ名の統一
+
+全ファイルで以下の名前に統一:
+- `local_grid_size` → `local_bev_size`
+- `local_channels` → `local_bev_channels`
+- `global_grid_size` → `global_bev_size`
+- `global_channels` → `global_bev_channels`
+
+#### 2. train.py の修正
+
+```python
+# Before (誤り)
+local_grid_size = cfg.model.get("local_grid_size", 64)
+model = TinyLidarNetLocalBEV(local_grid_size=cfg.model.get("local_grid_size", 64))
+
+# After (正しい)
+local_grid_size = cfg.model.local_bev_size
+model = TinyLidarNetLocalBEV(local_bev_size=cfg.model.local_bev_size)
+```
+
+#### 3. train_all_models.sh の修正
+
+```bash
+# 変数名変更
+LOCAL_BEV_SIZE=64
+LOCAL_BEV_CHANNELS=2
+GLOBAL_BEV_SIZE=128
+GLOBAL_BEV_CHANNELS=3
+
+# Hydra overrides
+TRAIN_EXTRA="model.local_bev_size=${LOCAL_BEV_SIZE} model.local_bev_channels=${LOCAL_BEV_CHANNELS}"
+
+# CLI args for convert
+CONVERT_EXTRA="--local-bev-size ${LOCAL_BEV_SIZE} --local-bev-channels ${LOCAL_BEV_CHANNELS}"
+```
+
+#### 4. convert_weight.py の修正
+
+```python
+# 関数シグネチャ変更
+def load_model(..., local_bev_size: int = 64, local_bev_channels: int = 2,
+               global_bev_size: int = 128, global_bev_channels: int = 3)
+
+# argparse変更
+parser.add_argument("--local-bev-size", type=int, default=64)
+parser.add_argument("--local-bev-channels", type=int, default=2)
+parser.add_argument("--global-bev-size", type=int, default=128)
+parser.add_argument("--global-bev-channels", type=int, default=3)
+```
+
+### テスト結果
+
+全11モデルがテストに成功:
+```
+✅ Passed: 11
+❌ Failed: 0
+🎉 All tests passed!
+```
+
+---
+
+## 📈 LR Scheduler & Early Stopping Configuration
+
+### 追加機能
+
+#### 1. LR Scheduler サポート
+
+3種類のLRスケジューラをサポート:
+- `cosine`: CosineAnnealingLR（推奨）
+- `step`: StepLR
+- `plateau`: ReduceLROnPlateau
+
+#### 2. config/train.yaml 設定
+
+```yaml
+train:
+  # Early stopping (null or 0 to disable)
+  early_stop_patience: 15
+
+  # LR Scheduler settings
+  scheduler:
+    # "cosine", "step", "plateau", or null to disable
+    type: "cosine"
+    # For step: step_size and gamma
+    step_size: 30
+    gamma: 0.1
+    # For plateau: factor, patience, min_lr
+    factor: 0.5
+    patience: 5
+    min_lr: 0.00001
+```
+
+#### 3. train_all_models.sh での設定
+
+```bash
+# エポック数を200に設定
+EPOCHS=200
+
+# Early stoppingを無効化（全エポック学習）
+train.epochs=${EPOCHS}
+train.early_stop_patience=null
+```
+
+### train.py への追加
+
+```python
+from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, ReduceLROnPlateau
+
+def create_scheduler(optimizer, cfg: DictConfig):
+    scheduler_cfg = cfg.train.get("scheduler", None)
+    if scheduler_cfg is None:
+        return None
+
+    scheduler_type = scheduler_cfg.get("type", None)
+    if scheduler_type == "cosine":
+        scheduler = CosineAnnealingLR(
+            optimizer, T_max=cfg.train.epochs,
+            eta_min=scheduler_cfg.get("min_lr", 0)
+        )
+    elif scheduler_type == "step":
+        scheduler = StepLR(
+            optimizer, step_size=scheduler_cfg.get("step_size", 30),
+            gamma=scheduler_cfg.get("gamma", 0.1)
+        )
+    elif scheduler_type == "plateau":
+        scheduler = ReduceLROnPlateau(
+            optimizer, factor=scheduler_cfg.get("factor", 0.5),
+            patience=scheduler_cfg.get("patience", 5),
+            min_lr=scheduler_cfg.get("min_lr", 1e-6)
+        )
+    return scheduler
+```
+
+### Early Stoppingの無効化
+
+```python
+# max_patience が None または 0 の場合は Early Stopping を無効化
+use_early_stopping = max_patience is not None and max_patience > 0
+
+# 条件チェックを追加
+if use_early_stopping and patience_counter >= max_patience:
+    print(f"Early stopping at epoch {epoch+1}")
+    break
+```
+
+---
+
+## 📊 学習計画サマリー
+
+### 最終的な学習設定
+
+| 項目 | 値 |
+|------|-----|
+| エポック数 | 200 |
+| Early Stopping | 無効 |
+| LR Scheduler | Cosine Annealing |
+| バッチサイズ | 64 |
+| 学習率 | 0.001 |
+
+### 学習対象モデル（24モデル）
+
+| カテゴリ | モデル数 | aug/noaug |
+|----------|----------|-----------|
+| Single-frame | 4 | 8 |
+| Temporal | 3 | 6 |
+| Map (×2 images) | 1×2 | 4 |
+| BEV | 3 | 6 |
+| **合計** | | **24** |
+
+### コミット
+
+```bash
+git commit -m "fix(tiny_lidar_net): align BEV parameter names and add LR scheduler support"
+```
+
+---
+
 ## 📚 参考
 
 - [TinyLidarNet Paper (arXiv:2410.07447)](https://arxiv.org/abs/2410.07447)

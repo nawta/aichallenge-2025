@@ -32,6 +32,9 @@ LOG_DIR="${SCRIPT_DIR}/training_logs"
 # Default input dimension (must match config/train.yaml)
 INPUT_DIM=1080
 
+# Training epochs (override default from config)
+EPOCHS=200
+
 # Check for CPU-only mode
 USE_CPU=""
 if [[ "$1" == "--cpu" ]]; then
@@ -146,6 +149,7 @@ train_model() {
         model.name='${MODEL_NAME}' \
         data.augment_mirror=${AUGMENT} \
         train.save_dir='${SAVE_DIR}' \
+        train.epochs=${EPOCHS} \
         train.early_stop_patience=null \
         ${TRAIN_EXTRA_ARGS}"
 
@@ -197,6 +201,7 @@ TOTAL_RUNS=$((TOTAL_SINGLE + TOTAL_TEMPORAL + TOTAL_MAP + TOTAL_BEV))
 
 echo ""
 echo "📋 Training Plan:"
+echo "   Epochs per model: ${EPOCHS}"
 echo "   Single-frame models: ${#SINGLE_FRAME_MODELS[@]} × 2 (aug/noaug) = ${TOTAL_SINGLE}"
 echo "   Temporal models: ${#TEMPORAL_MODELS[@]} × 2 (aug/noaug) = ${TOTAL_TEMPORAL}"
 echo "   Map models: ${#MAP_MODELS[@]} × ${#MAP_IMAGES[@]} maps × 2 (aug/noaug) = ${TOTAL_MAP}"
