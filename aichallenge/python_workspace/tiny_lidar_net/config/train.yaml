@@ -28,11 +28,11 @@ model:
   tcn_causal: false  # 学習時はnon-causal（未来も見る）
 
   # === Map モデル用パラメータ ===
-  map_image_path: null  # マップ画像パス（例: /aichallenge/map_image/1.png）
+  map_image_path: "/aichallenge/map_image/1.png"  # マップ画像パス
   map_feature_dim: 128  # マップ特徴量の次元
 
   # === BEV モデル用パラメータ ===
-  lane_csv_path: null   # レーン境界CSVパス
+  lane_csv_path: "/aichallenge/workspace/src/aichallenge_submit/laserscan_generator/map/lane.csv"   # レーン境界CSVパス
   local_bev_size: 64    # ローカルBEVグリッドサイズ
   local_bev_channels: 2 # ローカルBEVチャンネル数
   local_resolution: 1.0 # ローカルBEV解像度 (m/pixel)
