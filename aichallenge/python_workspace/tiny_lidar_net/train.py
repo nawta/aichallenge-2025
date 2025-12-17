@@ -108,10 +108,10 @@ def main(cfg: DictConfig):
     if is_bev:
         # BEV models: use BEVMultiSeqConcatDataset
         lane_csv_path = cfg.model.lane_csv_path
-        local_grid_size = cfg.model.get("local_grid_size", 64)
-        local_resolution = cfg.model.get("local_resolution", 1.0)
-        global_grid_size = cfg.model.get("global_grid_size", 128)
-        global_resolution = cfg.model.get("global_resolution", 1.5)
+        local_grid_size = cfg.model.local_bev_size
+        local_resolution = cfg.model.local_resolution
+        global_grid_size = cfg.model.global_bev_size
+        global_resolution = cfg.model.global_resolution
 
         print(f"[INFO] Loading lane CSV from: {lane_csv_path}")
         print(f"[INFO] Local BEV: {local_grid_size}x{local_grid_size} @ {local_resolution}m/px")
