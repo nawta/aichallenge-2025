@@ -585,7 +585,7 @@ class TinyLidarNetBiLSTM(nn.Module):
         # Encode each frame
         features = []
         for t in range(seq_len):
-            scan_t = scans[:, t:t+1, :].transpose(1, 2)  # (batch, 1, scan_dim)
+            scan_t = scans[:, t, :].unsqueeze(1)  # (batch, scan_dim) -> (batch, 1, scan_dim)
             odom_t = odoms[:, t, :]  # (batch, state_dim)
             feat_t = self.encode_frame(scan_t, odom_t)  # (batch, hidden_size)
             features.append(feat_t)
@@ -785,7 +785,7 @@ class TinyLidarNetTCN(nn.Module):
         # Encode each frame
         features = []
         for t in range(seq_len):
-            scan_t = scans[:, t:t+1, :].transpose(1, 2)  # (batch, 1, scan_dim)
+            scan_t = scans[:, t, :].unsqueeze(1)  # (batch, scan_dim) -> (batch, 1, scan_dim)
             odom_t = odoms[:, t, :]  # (batch, state_dim)
             feat_t = self.encode_frame(scan_t, odom_t)  # (batch, hidden_size)
             features.append(feat_t)
