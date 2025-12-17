@@ -824,6 +824,152 @@ map:
 
 ---
 
+## 🔧 train_all_models.sh 修正 & BEV学習パイプライン統合
+
+### 問題分析
+
+#### 発見した問題
+`train_all_models.sh` を実行したところ、時系列モデル（TinyLidarNetStacked, BiLSTM, TCN）が全て失敗していた。
+
+```
+Single-frame models: 成功 (1200-2700秒)
+Temporal models: 失敗 (1-2秒で終了、"No best_model.pth found")
+```
+
+#### 根本原因
+**エラー:** `train.py: error: unrecognized arguments: --seq-len 10 --hidden-size 128`
+
+スクリプトがHydra形式（ドット記法）とCLIフラグを混在させていた：
+```bash
+# 間違い - 形式が混在
+EXTRA_ARGS="model.seq_len=10 --seq-len 10"
+```
+
+`train.py` はHydraを使用しており、ドット記法のオーバーライドのみ受け付ける。
+
+### 実施した修正
+
+#### Commit 1: Priority 1 & 2 修正 (2408bf5)
+
+##### 1. config/train.yaml
+- `input_dim: 750` → `input_dim: 1080` に変更（モデルデフォルトに合わせる）
+
+##### 2. convert_weight.py
+- TCNモデル推論用に `--tcn-causal` 引数を追加
+
+##### 3. train_all_models.sh
+- **重要な修正:** train引数とconvert引数を分離：
+  ```bash
+  train_model() {
+      local TRAIN_EXTRA_ARGS=$4    # train.py用Hydraオーバーライド
+      local CONVERT_EXTRA_ARGS=$5  # convert_weight.py用CLI引数
+  }
+  ```
+- 時系列モデル用：
+  ```bash
+  TRAIN_EXTRA="model.seq_len=${SEQ_LEN} model.hidden_size=${HIDDEN_SIZE}"
+  CONVERT_EXTRA="--seq-len ${SEQ_LEN} --hidden-size ${HIDDEN_SIZE}"
+  ```
+
+##### 4. TinyLidarNetMap学習追加
+- 両方のマップ画像（1.png, 2.png）で学習
+- 各マップ用に別のチェックポイントディレクトリ
+
+---
+
+#### Commit 2: BEV学習パイプライン実装 (f6a821e)
+
+##### 新規作成ファイル
+
+**lib/bev_generator.py**
+- `BEVGenerator` クラス: `generate_local()`, `generate_global()`, `generate_both()` メソッド
+- Local BEV: 64×64グリッド、2チャンネル（左/右境界）、車両中心、yaw回転あり
+- Global BEV: 128×128グリッド、3チャンネル（左/右/自車マーカー）、マップ固定座標
+- Bresenhamのラインアルゴリズムで効率的なグリッド描画
+- `quaternion_to_yaw()` ユーティリティ関数
+
+**lib/map_loader.py**
+- `LaneBoundaries` データクラス: 境界データの整理された格納
+- `load_lane_boundaries()`: CSVパース関数
+- `get_nearby_boundaries()`: 空間クエリ用
+- 座標オフセットの自動/手動正規化
+
+##### 変更ファイル
+
+**lib/model.py** (+410行)
+- `TinyLidarNetLocalBEV`: LiDAR (5 Conv1D) + Local BEV (3 Conv2D) + State (FC) → Late Fusion
+- `TinyLidarNetGlobalBEV`: LiDAR + Global BEV (4 Conv2D) + State → Late Fusion
+- `TinyLidarNetDualBEV`: LiDAR + 両BEV + State → Late Fusion（最大モデル）
+- 全てMLPヘッド前の連結によるLate Fusionアーキテクチャ
+
+**lib/data.py** (+336行)
+- `BEVScanControlSequenceDataset`: BEV生成付き単一シーケンスデータセット
+- `BEVMultiSeqConcatDataset`: BEV用マルチシーケンス連結
+- `bev_mode` サポート: 'local', 'global', 'both'
+- ミラー拡張: スキャン・BEV水平反転、左右チャンネル入れ替え、ステアリング符号反転
+
+**train.py** (+147行)
+- `BEV_MODELS` 定数追加
+- モデル名からBEVモード自動検出
+- `BEVMultiSeqConcatDataset` でのBEV専用データセット作成
+- 学習/検証ループでのBEV専用バッチ展開
+
+**convert_weight.py** (+58行)
+- argparseにBEVモデル選択肢追加
+- `--local-grid-size` と `--global-grid-size` 引数追加
+- `load_model()` でのBEVモデルインスタンス化
+
+**train_all_models.sh** (+46行)
+- 3モデルの `BEV_MODELS` 配列追加
+- BEVパラメータ（グリッドサイズ、解像度、lane CSVパス）
+- BEV学習セクション追加
+
+### 学習可能なモデル一覧
+
+| カテゴリ | モデル | aug/noaug |
+|----------|--------|-----------|
+| Single-frame | TinyLidarNet, Small, Deep, Fusion | 4 × 2 = 8 |
+| Temporal | Stacked, BiLSTM, TCN | 3 × 2 = 6 |
+| Map | TinyLidarNetMap (×2 maps) | 1 × 2 × 2 = 4 |
+| BEV | LocalBEV, GlobalBEV, DualBEV | 3 × 2 = 6 |
+| **合計** | | **24回** |
+
+### 重要なパス
+
+- Lane CSV: `/aichallenge/workspace/src/aichallenge_submit/laserscan_generator/map/lane.csv`
+- Map images: `/aichallenge/map_image/1.png`, `/aichallenge/map_image/2.png`
+- Checkpoints: `checkpoints/{ModelName}_{aug|noaug}/`
+- Weights: `weights/{ModelName}_{aug|noaug}.npy`
+
+### 使用方法
+
+#### 時系列モデル修正テスト
+```bash
+# "unrecognized arguments" エラーなく動作するはず
+python3 train.py model.name='TinyLidarNetStacked' model.seq_len=10 model.hidden_size=128
+```
+
+#### BEVモデルテスト
+```bash
+# 単一BEVモデル
+python3 train.py \
+  model.name='TinyLidarNetLocalBEV' \
+  model.lane_csv_path='/aichallenge/workspace/src/aichallenge_submit/laserscan_generator/map/lane.csv'
+
+# 全モデル一括学習（一晩）
+./train_all_models.sh
+```
+
+### Gitコミット
+
+| Hash | メッセージ |
+|------|------------|
+| `2408bf5` | fix(tiny_lidar_net): separate Hydra/CLI args and add TinyLidarNetMap training |
+| `f6a821e` | feat(tiny_lidar_net): add BEV model support for training |
+| `27c632d` | docs: add development log for 2025/12/17 |
+
+---
+
 ## 📚 参考
 
 - [TinyLidarNet Paper (arXiv:2410.07447)](https://arxiv.org/abs/2410.07447)
