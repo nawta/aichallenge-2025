@@ -9,8 +9,6 @@
 #   ./test_all_models.sh
 # =============================================================================
 
-set -e  # Exit on error
-
 # Navigate to script directory (tiny_lidar_net)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
@@ -34,18 +32,23 @@ test_model() {
     echo "Testing: ${MODEL_NAME}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-    if python3 train.py \
+    # Run training and capture exit code
+    python3 train.py \
         model.name="${MODEL_NAME}" \
         train.epochs=${TEST_EPOCHS} \
         train.batch_size=${TEST_BATCH_SIZE} \
         train.save_dir="./tmp/test_${MODEL_NAME}" \
         train.log_dir="./tmp/logs_${MODEL_NAME}" \
         data.augment_mirror=false \
-        ${EXTRA_ARGS} 2>&1 | head -100; then
+        ${EXTRA_ARGS}
+
+    local EXIT_CODE=$?
+
+    if [ ${EXIT_CODE} -eq 0 ]; then
         echo "✅ ${MODEL_NAME}: PASSED"
         return 0
     else
-        echo "❌ ${MODEL_NAME}: FAILED"
+        echo "❌ ${MODEL_NAME}: FAILED (exit code: ${EXIT_CODE})"
         return 1
     fi
 }
