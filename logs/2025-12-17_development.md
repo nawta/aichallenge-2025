@@ -971,12 +971,11 @@ python3 train.py \
 
 ### クイックテストスクリプト
 
-全モデルの動作確認用スクリプト `test_all_models.sh` を作成:
+全モデルの動作確認用スクリプト `tests/test_all_tiny_lidar_models.sh` を作成:
 
 ```bash
-# Dockerコンテナ内で実行
-cd /aichallenge/python_workspace/tiny_lidar_net
-./test_all_models.sh
+# Dockerコンテナ内で実行（リポジトリルートから）
+./tests/test_all_tiny_lidar_models.sh
 ```
 
 - 1エポック、小バッチサイズでテスト
