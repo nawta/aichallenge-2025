@@ -4,16 +4,16 @@
 # =============================================================================
 # Tests all model architectures with 1 epoch to verify they work correctly.
 #
-# Usage:
-#   ./tests/test_all_tiny_lidar_models.sh  (from repo root)
+# Usage (inside Docker container):
+#   cd /aichallenge/python_workspace/tiny_lidar_net
+#   ./test_all_models.sh
 # =============================================================================
 
 set -e  # Exit on error
 
-# Navigate to tiny_lidar_net directory
+# Navigate to script directory (tiny_lidar_net)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TINY_LIDAR_DIR="${SCRIPT_DIR}/../aichallenge/python_workspace/tiny_lidar_net"
-cd "${TINY_LIDAR_DIR}"
+cd "${SCRIPT_DIR}"
 
 # Test parameters
 TEST_EPOCHS=1
@@ -119,7 +119,7 @@ echo "=========================================="
 
 LANE_CSV="/aichallenge/workspace/src/aichallenge_submit/laserscan_generator/map/lane.csv"
 if [ -f "${LANE_CSV}" ]; then
-    BEV_EXTRA="model.lane_csv_path='${LANE_CSV}' model.local_grid_size=32 model.global_grid_size=64"
+    BEV_EXTRA="model.lane_csv_path='${LANE_CSV}' model.local_bev_size=32 model.global_bev_size=64"
 
     for MODEL in "TinyLidarNetLocalBEV" "TinyLidarNetGlobalBEV" "TinyLidarNetDualBEV"; do
         if test_model "${MODEL}" "${BEV_EXTRA}"; then
