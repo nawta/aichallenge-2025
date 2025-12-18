@@ -202,17 +202,53 @@ TOTAL_RUNS=$((TOTAL_SINGLE + TOTAL_TEMPORAL + TOTAL_MAP + TOTAL_BEV))
 echo ""
 echo "📋 Training Plan:"
 echo "   Epochs per model: ${EPOCHS}"
-echo "   Single-frame models: ${#SINGLE_FRAME_MODELS[@]} × 2 (aug/noaug) = ${TOTAL_SINGLE}"
-echo "   Temporal models: ${#TEMPORAL_MODELS[@]} × 2 (aug/noaug) = ${TOTAL_TEMPORAL}"
-echo "   Map models: ${#MAP_MODELS[@]} × ${#MAP_IMAGES[@]} maps × 2 (aug/noaug) = ${TOTAL_MAP}"
-echo "   BEV models: ${#BEV_MODELS[@]} × 2 (aug/noaug) = ${TOTAL_BEV}"
+echo "   1. Map models (PRIORITY): ${#MAP_MODELS[@]} × ${#MAP_IMAGES[@]} maps × 2 (aug/noaug) = ${TOTAL_MAP}"
+echo "   2. Single-frame models: ${#SINGLE_FRAME_MODELS[@]} × 2 (aug/noaug) = ${TOTAL_SINGLE}"
+echo "   3. Temporal models: ${#TEMPORAL_MODELS[@]} × 2 (aug/noaug) = ${TOTAL_TEMPORAL}"
+echo "   4. BEV models: ${#BEV_MODELS[@]} × 2 (aug/noaug) = ${TOTAL_BEV}"
 echo "   Total: ${TOTAL_RUNS} training runs"
 echo ""
+
+# =============================================================================
+# Train Map Models (PRIORITY - train first)
+# =============================================================================
+
+echo "=========================================="
+echo "🔹 Training Map Models (Priority)"
+echo "=========================================="
+
+MAP_FEATURE_DIM=128
+
+for MAP_IMAGE in "${MAP_IMAGES[@]}"; do
+    # Extract map name from path (e.g., "1" from "/aichallenge/map_image/1.png")
+    MAP_NAME=$(basename "${MAP_IMAGE}" .png)
+
+    for MODEL_INFO in "${MAP_MODELS[@]}"; do
+        MODEL_NAME="${MODEL_INFO%%:*}"
+        CONVERT_NAME="${MODEL_INFO##*:}"
+
+        # Hydra overrides for train.py
+        TRAIN_EXTRA="model.map_image_path='${MAP_IMAGE}' model.map_feature_dim=${MAP_FEATURE_DIM}"
+
+        # CLI args for convert_weight.py
+        CONVERT_EXTRA="--map-feature-dim ${MAP_FEATURE_DIM}"
+
+        # Save suffix to distinguish different map versions
+        SAVE_SUFFIX="_map${MAP_NAME}"
+
+        # With augmentation
+        train_model "${MODEL_NAME}" "${CONVERT_NAME}" "true" "${TRAIN_EXTRA}" "${CONVERT_EXTRA}" "${SAVE_SUFFIX}"
+
+        # Without augmentation
+        train_model "${MODEL_NAME}" "${CONVERT_NAME}" "false" "${TRAIN_EXTRA}" "${CONVERT_EXTRA}" "${SAVE_SUFFIX}"
+    done
+done
 
 # =============================================================================
 # Train Single-frame Models
 # =============================================================================
 
+echo ""
 echo "=========================================="
 echo "🔹 Training Single-frame Models"
 echo "=========================================="
@@ -263,42 +299,6 @@ for MODEL_INFO in "${TEMPORAL_MODELS[@]}"; do
 
     # Without augmentation
     train_model "${MODEL_NAME}" "${CONVERT_NAME}" "false" "${TRAIN_EXTRA}" "${CONVERT_EXTRA}"
-done
-
-# =============================================================================
-# Train Map Models
-# =============================================================================
-
-echo ""
-echo "=========================================="
-echo "🔹 Training Map Models"
-echo "=========================================="
-
-MAP_FEATURE_DIM=128
-
-for MAP_IMAGE in "${MAP_IMAGES[@]}"; do
-    # Extract map name from path (e.g., "1" from "/aichallenge/map_image/1.png")
-    MAP_NAME=$(basename "${MAP_IMAGE}" .png)
-
-    for MODEL_INFO in "${MAP_MODELS[@]}"; do
-        MODEL_NAME="${MODEL_INFO%%:*}"
-        CONVERT_NAME="${MODEL_INFO##*:}"
-
-        # Hydra overrides for train.py
-        TRAIN_EXTRA="model.map_image_path='${MAP_IMAGE}' model.map_feature_dim=${MAP_FEATURE_DIM}"
-
-        # CLI args for convert_weight.py
-        CONVERT_EXTRA="--map-feature-dim ${MAP_FEATURE_DIM}"
-
-        # Save suffix to distinguish different map versions
-        SAVE_SUFFIX="_map${MAP_NAME}"
-
-        # With augmentation
-        train_model "${MODEL_NAME}" "${CONVERT_NAME}" "true" "${TRAIN_EXTRA}" "${CONVERT_EXTRA}" "${SAVE_SUFFIX}"
-
-        # Without augmentation
-        train_model "${MODEL_NAME}" "${CONVERT_NAME}" "false" "${TRAIN_EXTRA}" "${CONVERT_EXTRA}" "${SAVE_SUFFIX}"
-    done
 done
 
 # =============================================================================
